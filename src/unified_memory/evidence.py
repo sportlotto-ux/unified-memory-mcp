@@ -96,9 +96,8 @@ def parse_number(raw: str) -> float | None:
         return None
 
 
-def _numbers(text: str, pattern: str) -> list[float]:
-    if pattern:
-        rx = re.compile(pattern)
+def _numbers(text: str, rx: re.Pattern | None) -> list[float]:
+    if rx is not None:
         raw = [m.group(1) if m.groups() else m.group(0) for m in rx.finditer(text)]
     else:
         raw = _NUM.findall(text)
@@ -243,12 +242,18 @@ def run_compute(store, refs: list[str], op: str = "count", pattern: str = "",
     op = (op or "").strip().lower()
     if op not in _OPS:
         raise ValueError(f"unknown op {op!r}: {list(_OPS)}")
+    rx = None
+    if pattern:
+        try:
+            rx = re.compile(pattern)
+        except re.error as e:
+            raise ValueError(f"bad pattern {pattern!r}: {e}")
     rows, rejections = _resolve(store, refs, owner, max_refs, max_chars,
                                 archived_fetch)
     values: list[float] = []
     refs_out = []
     for key, body, archived in rows:
-        nums = _numbers(body, pattern)
+        nums = _numbers(body, rx)
         values += nums
         refs_out.append({"kind": key[0], "id": key[1],
                          "numbers": [round(v, 6) for v in nums],

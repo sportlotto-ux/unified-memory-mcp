@@ -230,6 +230,14 @@ def test_conflicts_records_rejections(store):
     assert out["count"] == 0
 
 
+def test_compute_bad_pattern_is_clean_error(store):
+    a = store.add_fact("m", "a", "число 1")
+    with pytest.raises(ValueError, match="bad pattern"):
+        run_compute(store, [f"fact:{a}"], op="sum", pattern="(")
+    with pytest.raises(ValueError, match="unknown op"):
+        run_compute(store, [f"fact:{a}"], op="nope")
+
+
 # ---------- config + server wiring ----------
 
 def test_evidence_config_defaults_and_validation(tmp_path):
