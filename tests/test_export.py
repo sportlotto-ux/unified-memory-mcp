@@ -1,9 +1,12 @@
-"""v0.7 п.7: mem_doctor(mode=export) — JSON-файл, read-only, schema_version."""
+"""v0.8 D16: mem_doctor(mode=export) — стриминговый JSONL, read-only."""
 
 import json
 from pathlib import Path
 
 import pytest
+
+CONTENT = {"um_messages", "um_summaries", "um_facts", "um_entities",
+           "um_edges", "um_links", "um_vectors", "um_meta"}
 
 
 @pytest.fixture
@@ -19,6 +22,11 @@ def srv(tmp_path, monkeypatch):
     m._STATE.update(ingest=None, store=None, cfg=None)
 
 
+def _read_jsonl(path):
+    lines = Path(path).read_text(encoding="utf-8").splitlines()
+    return json.loads(lines[0]), [json.loads(x) for x in lines[1:]]
+
+
 def _counts(m):
     m._ingest()
     st = m._STATE["store"]
@@ -26,23 +34,38 @@ def _counts(m):
             for t in ("um_facts", "um_messages", "um_links")}
 
 
-def test_export_writes_valid_json_readonly(srv):
+def test_export_writes_jsonl_readonly(srv):
     srv.mem_fact("pref", "a", "яблоко")
     srv.mem_fact("pref", "b", "банан")
     before = _counts(srv)
     out = json.loads(srv.mem_doctor(mode="export"))
-    p = Path(out["path"])
-    assert p.exists() and out["bytes"] > 0
-    data = json.loads(p.read_text(encoding="utf-8"))
-    assert data["schema_version"] == "1"
-    assert {"um_facts", "um_messages", "um_edges", "um_links",
-            "um_vectors"} <= set(data["tables"])
+    header, rows = _read_jsonl(out["path"])
+    assert header["format"] == "um-export-jsonl"
+    assert header["schema_version"] == "1"
+    assert out["streaming"] is True and out["archive_included"] is False
     assert out["counts"]["um_facts"] == 2
-    assert len(data["tables"]["um_facts"]) == 2
-    assert out["archive_included"] is False
+    tables = {r["table"] for r in rows}
+    assert set(header["counts"]) == CONTENT      # все таблицы объявлены в header
+    assert tables <= CONTENT
+    assert "um_fts" not in header["counts"] and "um_vecidx" not in header["counts"]
+    facts = [r["row"] for r in rows if r["table"] == "um_facts"]
+    assert len(facts) == 2
     assert _counts(srv) == before  # read-only
 
 
 def test_export_does_not_require_apply(srv):
     out = json.loads(srv.mem_doctor(mode="export", apply=False))
-    assert "path" in out and "schema_version" in out
+    assert out["path"].endswith(".jsonl") and out["format"] == "um-export-jsonl"
+
+
+def test_export_vectors_base64(srv, tmp_path, monkeypatch):
+    """Вектора в дампе — base64 BLOB (lossless), не пересчёт."""
+    import unified_memory.server as m
+    from fake_backend import FakeBackend
+    monkeypatch.setattr(m, "_backend", lambda c: FakeBackend())
+    m._STATE.update(ingest=None, store=None, cfg=None, backend_error=None)
+    srv.mem_fact("pref", "a", "яблоко")
+    out = json.loads(srv.mem_doctor(mode="export"))
+    _, rows = _read_jsonl(out["path"])
+    vecs = [r["row"] for r in rows if r["table"] == "um_vectors"]
+    assert vecs and all(isinstance(v["embedding"], str) for v in vecs)
