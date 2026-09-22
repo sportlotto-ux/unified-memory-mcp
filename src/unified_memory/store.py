@@ -433,8 +433,8 @@ class Store:
                     owner: str = "") -> dict | None:
         """Правка факта по id без потери provenance.
 
-        valid_until in-place (0 = reopen), затем body/importance. Новое тело =
-        новая версия (supersede), id меняется, chain фиксируется в superseded_by.
+        Сначала valid_until in-place (0 = reopen + возврат рёбер факта), затем
+        body/importance. Новое тело = новая версия (supersede), id меняется.
         """
         row = self.conn.execute(
             "SELECT owner, category, name, body, importance, valid_until"
@@ -442,29 +442,58 @@ class Store:
         if not row:
             return None
         r_owner, cat, name, cur_body, cur_imp, cur_vu = row
-        if owner and (r_owner or "") != owner:
+        r_owner = r_owner or ""
+        if owner and r_owner != owner:
             return None
+        reopened = False
         if valid_until is not None:
-            self.conn.execute(
-                "UPDATE um_facts SET valid_until=?, updated_at=? WHERE id=?",
-                (float(valid_until), time.time(), fid))
+            vu = float(valid_until)
+            if vu == 0:
+                other = self.conn.execute(
+                    "SELECT id FROM um_facts WHERE owner=? AND category=? AND name=?"
+                    " AND valid_until=0 AND id<>?", (r_owner, cat, name, fid)).fetchone()
+                if other:
+                    raise ValueError(
+                        f"slot already has a live version (id={other[0]});"
+                        " supersede it instead of reopening")
+                self.conn.execute(
+                    "UPDATE um_facts SET valid_until=0, updated_at=? WHERE id=?",
+                    (time.time(), fid))
+                # ребро вернулось вместе с фактом
+                self.conn.execute(
+                    "UPDATE um_edges SET valid_until=0"
+                    " WHERE fact_id=? AND valid_until>0", (fid,))
+                reopened = True
+                cur_vu = 0
+            else:
+                self.conn.execute(
+                    "UPDATE um_facts SET valid_until=?, updated_at=? WHERE id=?",
+                    (vu, time.time(), fid))
+                self.conn.execute(
+                    "UPDATE um_edges SET valid_until=?"
+                    " WHERE fact_id=? AND valid_until=0", (vu, fid))
+                self.conn.commit()
+                if body is not None and body != cur_body:
+                    raise ValueError(
+                        "cannot edit while expiring; reopen with valid_until=0 first")
+                return {"id": fid, "status": "expired", "superseded_id": 0}
             self.conn.commit()
-            status = "reopened" if float(valid_until) == 0 else "expired"
-            return {"id": fid, "status": status, "superseded_id": 0}
+        # здесь факт живой (возможно, только что reopened) — правим body/importance
         if body is not None and body != cur_body:
             if cur_vu > 0:
                 raise ValueError(
                     "cannot edit expired fact; reopen with valid_until=0 first")
             return self._upsert_fact(
                 cat, name, body,
-                importance if importance is not None else cur_imp,
-                r_owner or "")
+                importance if importance is not None else cur_imp, r_owner)
         if importance is not None and abs(importance - cur_imp) > 1e-9:
             self.conn.execute(
                 "UPDATE um_facts SET importance=?, updated_at=? WHERE id=?",
                 (max(0.0, min(1.0, importance)), time.time(), fid))
             self.conn.commit()
             return {"id": fid, "status": "updated", "superseded_id": 0}
+        if reopened:
+            return {"id": fid, "status": "reopened", "superseded_id": 0}
         return {"id": fid, "status": "noop", "superseded_id": 0}
 
     @_locked
@@ -623,13 +652,17 @@ class Store:
 
     @_locked
     def session_messages(self, session_id: str, after_id: int = 0,
-                         limit: int = 50, owner: str = "") -> list[dict]:
+                         limit: int = 50, owner: str = "",
+                         include_archived: bool = False) -> list[dict]:
         q = ("SELECT id, session_id, role, content, created_at, source FROM um_messages"
              " WHERE session_id=? AND id>?")
         params: list = [session_id, after_id]
         if owner:
             q += " AND owner=?"
             params.append(owner)
+        if not include_archived:
+            # заглушки [archived] не должны попадать в контекст/компакшн
+            q += " AND (externalized_ref IS NULL OR externalized_ref='')"
         rows = self.conn.execute(q + " ORDER BY id LIMIT ?", (*params, limit)).fetchall()
         keys = ["id", "session_id", "role", "content", "created_at", "source"]
         return [dict(zip(keys, r)) for r in rows]
@@ -896,7 +929,8 @@ class Store:
 
     @_locked
     def recent(self, start_ts: float, end_ts: float, session_id: str = "",
-               owner: str = "", limit: int = 20) -> list[dict]:
+               owner: str = "", limit: int = 20,
+               include_archived: bool = False) -> list[dict]:
         """Temporal выборка поверх messages+summaries: [start, end), свежие first."""
         out: list[dict] = []
         mq = ("SELECT id, session_id, content, created_at FROM um_messages"
@@ -908,6 +942,8 @@ class Store:
         if owner:
             mq += " AND owner=?"
             mp.append(owner)
+        if not include_archived:
+            mq += " AND (externalized_ref IS NULL OR externalized_ref='')"
         for mid, sid, body, ts in self.conn.execute(
                 mq + " ORDER BY created_at DESC, id DESC LIMIT ?", (*mp, limit)):
             out.append({"kind": "um_messages", "id": mid, "session_id": sid,

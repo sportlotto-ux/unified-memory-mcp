@@ -272,11 +272,15 @@ def mem_status() -> str:
     """Store stats and degradation flags."""
     ing = _ingest()
     cfg = _STATE["cfg"]
-    conn = archive.open_archive(cfg.archive_path)
-    try:
-        arch = archive.status(conn, cfg.archive_path)
-    finally:
-        conn.close()
+    if cfg.archive_path.exists():  # чтение не должно создавать архив
+        conn = archive.open_archive(cfg.archive_path)
+        try:
+            arch = archive.status(conn, cfg.archive_path)
+        finally:
+            conn.close()
+    else:
+        arch = {"archive_path": str(cfg.archive_path), "archive_bytes": 0,
+                "archived_messages": 0, "archived_vectors": 0}
     return json.dumps({**ing.store.stats(),
                        "vectors_enabled": ing.backend is not None,
                        "embedding_backend": cfg.embedding_backend,
