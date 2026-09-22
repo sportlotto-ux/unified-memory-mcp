@@ -104,10 +104,14 @@ def parse_when(value: str, now: datetime | None = None) -> float | None:
     except ValueError:
         pass
     try:
-        return float(v)
+        ts = float(v)
     except ValueError as exc:
         raise ValueError(
             "valid_until must be '', 'open', 'now', YYYY-MM-DD or epoch") from exc
+    if ts < 0:
+        raise ValueError("valid_until epoch must be >= 0 (0 = reopen, "
+                         "negative = already-expired sentinel is not allowed)")
+    return ts
 
 
 def parse_as_of(value: str, now: datetime | None = None) -> float | None:

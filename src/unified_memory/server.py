@@ -91,16 +91,16 @@ def _maybe_maintenance(store, cfg) -> None:
         # (б) страховка от быстрого роста — работает и при retention=0
         if store.db_size_bytes() >= size_limit:
             total = 0
-            for _ in range(10):  # bounded: не более 10 батчей за проход
-                conn = archive.open_archive(cfg.archive_path)
-                try:
-                    moved = archive.move_oldest(store, conn, cfg.archive_batch,
-                                                label=str(cfg.archive_path))
-                finally:
-                    conn.close()
-                total += moved
-                if moved == 0 or store.db_size_bytes() < size_limit:
-                    break
+            conn = archive.open_archive(cfg.archive_path)
+            try:
+                for _ in range(10):  # bounded: не более 10 батчей за проход
+                    moved = archive.move_oldest(
+                        store, conn, cfg.archive_batch, label=str(cfg.archive_path))
+                    total += moved
+                    if moved == 0 or store.db_size_bytes() < size_limit:
+                        break
+            finally:
+                conn.close()
             store.meta_set("archive_last_run", str(now))
             store.meta_set("archive_last_moved", str(total))
     except Exception as e:  # noqa: BLE001 — обслуживание не должно ломать тулы
@@ -378,14 +378,21 @@ def mem_doctor(mode: str = "check", apply: bool = False) -> str:
         if cfg.retention_days <= 0:
             return json.dumps({"mode": mode, "skipped": "retention_days=0 (keep forever)"})
         cutoff = time.time() - cfg.retention_days * 86400
-        conn = archive.open_archive(cfg.archive_path)
-        try:
-            if not apply:
+        if not apply:
+            if not cfg.archive_path.exists():  # dry-run не создаёт архив
+                return json.dumps({"mode": mode, "apply_required": True,
+                                   "would_purge": 0})
+            conn = archive.open_archive(cfg.archive_path)
+            try:
                 n = conn.execute(
                     "SELECT count(*) FROM ar_messages WHERE created_at < ?",
                     (cutoff,)).fetchone()[0]
-                return json.dumps({"mode": mode, "apply_required": True,
-                                   "would_purge": n})
+            finally:
+                conn.close()
+            return json.dumps({"mode": mode, "apply_required": True,
+                               "would_purge": n})
+        conn = archive.open_archive(cfg.archive_path)
+        try:
             purged = archive.purge_older_than(conn, cutoff)
         finally:
             conn.close()

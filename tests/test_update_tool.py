@@ -20,6 +20,8 @@ def test_parse_when():
     assert parse_when("1700000000", NOW) == 1700000000.0
     with pytest.raises(ValueError, match="valid_until"):
         parse_when("завтра", NOW)
+    with pytest.raises(ValueError, match="must be >= 0"):
+        parse_when("-5", NOW)  # молчаливо-истёкшее запрещено
 
 
 @pytest.fixture
