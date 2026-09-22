@@ -130,6 +130,8 @@ class Router:
         if diagnostics:
             timing["vectors_ms"] = round((time.perf_counter() - t0) * 1000, 3)
             t0 = time.perf_counter()
+        if hops is None:  # defensive: прямые вызовы Router (MCP валидирует тип)
+            hops = 1
         if hops > 1:
             # guardrail 1: старый _graph_arm не тронут; BFS — отдельная ветка.
             seeds = [(h.owner_table, h.owner_id) for lst in lists for h in lst]
@@ -332,7 +334,8 @@ class Router:
         for nb in nbs:
             nt, nid = nb["table"], nb["id"]
             key = (nt, nid)
-            w = float(nb.get("weight", 1.0) or 1.0)  # A1: вес линка в скоринге
+            w = nb.get("weight", 1.0)
+            w = 1.0 if w is None else float(w)  # A1: вес в скоринге; явный 0 валиден (CHECK weight>=0)
             if key not in emitted and key not in seed_keys:
                 if self.store.node_ok(nt, nid, owner, include_expired, as_of):
                     found = self.store.bodies_for([(nt, nid)]).get((nt, nid))

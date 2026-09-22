@@ -225,3 +225,31 @@ def test_deleted_link_end_graceful_skip(rig):
     hits = r.recall("якорь", scope="all", limit=10, hops=2, diagnostics=True)
     assert all(h.owner_id != b for h in hits)  # обход не падает и не отдаёт мёртвое
     assert r.last_stats["diagnostics"]["bfs"]["skipped_missing"] >= 1
+
+
+# ---------- P4-микро: явный weight=0 не съедается `or 1.0` ----------
+
+def test_zero_weight_honored(rig):
+    st, r = rig
+    a = _fact(st, "c", "a", "якорь нулевой")
+    b = _fact(st, "c", "b", "нулевой вес")
+    c = _fact(st, "c", "c", "единичный вес")
+    st.link("um_facts", a, "um_facts", b, "supports", weight=0.0)
+    st.link("um_facts", a, "um_facts", c, "supports", weight=1.0)
+    gd = {(h.owner_table, h.owner_id): h.score
+          for h in r._graph_bfs("якорь", "all", "", 10, "", False, None, 2, "",
+                                [("um_facts", a)])}
+    assert gd[("um_facts", b)] == 0.0          # ноль чтится, не превращается в 1.0
+    assert gd[("um_facts", c)] == pytest.approx(1.0)
+
+
+# ---------- P4-микро: прямой вызов Router с hops=None не падает ----------
+
+def test_hops_none_defensive(rig):
+    st, r = rig
+    _fact(st, "c", "a", "якорь")
+    got = [(h.owner_table, h.owner_id)
+           for h in r.recall("якорь", scope="facts", hops=None)]
+    base = [(h.owner_table, h.owner_id)
+            for h in r.recall("якорь", scope="facts", hops=1)]
+    assert got == base
