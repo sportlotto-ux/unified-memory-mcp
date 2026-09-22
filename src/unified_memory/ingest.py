@@ -25,11 +25,16 @@ class Ingest:
         self.window = ActiveWindow(store, summarizer, self.cfg)
 
     def _clean(self, text: str) -> str:
-        """Redaction-гейт: весь входящий текст — через него до SQLite/FTS/vectors."""
+        """Redaction-гейт + кап длины: весь входящий текст — до SQLite/FTS/vectors."""
         if self.cfg.redact_enabled:
             from .redact import redact_text
 
-            return redact_text(text, self.cfg.redact_patterns)
+            text = redact_text(text, self.cfg.redact_patterns)
+        # B10: громкий отказ вместо тихой обрезки; накрывает remember/fact/batch.
+        if len(text) > self.cfg.max_text_chars:
+            raise ValueError(
+                f"text exceeds UM_MAX_TEXT_CHARS={self.cfg.max_text_chars} "
+                f"(got {len(text)} chars) — split the payload")
         return text
 
     def remember_message(self, session_id: str, role: str, content: str,

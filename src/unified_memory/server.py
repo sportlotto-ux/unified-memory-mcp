@@ -108,6 +108,8 @@ def _maybe_maintenance(store, cfg) -> None:
                 conn.close()
             store.meta_set("archive_last_run", str(now))
             store.meta_set("archive_last_moved", str(total))
+        # B9: держим WAL от неограниченного роста (best-effort, never-raises).
+        store.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     except Exception as e:  # noqa: BLE001 — обслуживание не должно ломать тулы
         try:
             store.meta_set("maintenance_error", f"{type(e).__name__}: {e}"[:200])
@@ -391,6 +393,14 @@ def mem_batch(ops: list[dict] | None = None, dry_run: bool = False,
                       ensure_ascii=False)
 
 
+def _wal_bytes(db_path) -> int:
+    """B9: размер -wal рядом с БД (0, если нет). Витрина перед checkpoint."""
+    try:
+        return os.path.getsize(str(db_path) + "-wal")
+    except OSError:
+        return 0
+
+
 @mcp.tool()
 def mem_status() -> str:
     """Store stats and degradation flags."""
@@ -416,6 +426,7 @@ def mem_status() -> str:
                        "summarizer": type(default_summarizer()).__name__,
                        "db": str(cfg.db_path),
                        "db_size_bytes": ing.store.db_size_bytes(),
+                       "wal_bytes": _wal_bytes(cfg.db_path),
                        "retention_days": cfg.retention_days,
                        "retention_last_run": ing.store.meta_get("retention_last_run"),
                        "maintenance_error": ing.store.meta_get("maintenance_error"),

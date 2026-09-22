@@ -150,6 +150,10 @@ def _default_batch_max_ops() -> int:
     return _strict_int("UM_BATCH_MAX_OPS", 100)
 
 
+def _default_max_text_chars() -> int:
+    return _strict_int("UM_MAX_TEXT_CHARS", 200000)
+
+
 def _default_batch_max_chars() -> int:
     return _strict_int("UM_BATCH_MAX_CHARS", 200000)
 
@@ -214,6 +218,8 @@ class Config:
     # v0.7-п.5b: капы mem_batch (валидируются ДО открытия контура).
     batch_max_ops: int = field(default_factory=_default_batch_max_ops)
     batch_max_chars: int = field(default_factory=_default_batch_max_chars)
+    # v0.7.3 (B10): кап входного текста — один гейт в Ingest._clean.
+    max_text_chars: int = field(default_factory=_default_max_text_chars)
 
     def __post_init__(self) -> None:
         if self.embedding_backend not in ("local", "openai"):
@@ -256,6 +262,8 @@ class Config:
             raise ValueError("UM_BATCH_MAX_OPS must be > 0")
         if self.batch_max_chars <= 0:
             raise ValueError("UM_BATCH_MAX_CHARS must be > 0")
+        if self.max_text_chars <= 0:
+            raise ValueError("UM_MAX_TEXT_CHARS must be > 0")
         if self.context_tokens <= 0:
             raise ValueError("UM_CONTEXT_TOKENS must be > 0")
         if not 0.0 < self.compact_threshold <= 1.0:
