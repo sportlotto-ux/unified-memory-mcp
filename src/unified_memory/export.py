@@ -38,27 +38,33 @@ def _encode_row(cols: list[str], row: tuple) -> dict:
 
 
 def export_store(store: Store, path: str | Path | None = None) -> dict:
-    """JSONL-дамп. Имя по умолчанию: <db>.export-<ts>.jsonl."""
+    """JSONL-дамп. Имя по умолчанию: <db>.export-<ts>.jsonl.
+
+    Весь проход — под store.read_locked(): консистентный снепшот без гонки с
+    писателями (FastMCP-треды делят один conn). Цена — сериализация писателей
+    на время экспорта; живые большие БД экспортируйте в тишине.
+    """
     ts = time.strftime("%Y%m%d-%H%M%S")
     out_path = Path(path) if path else Path(f"{store._db_path}.export-{ts}.jsonl")
-    counts = {t: store.conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
-              for t in CONTENT_TABLES}
-    header = {"format": FORMAT,
-              "schema_version": store.meta_get("schema_version") or "1",
-              "exported_at": time.time(), "source_db": store._db_path,
-              "counts": counts}
-    written = 0
-    with out_path.open("w", encoding="utf-8") as f:
-        line = json.dumps(header, ensure_ascii=False) + "\n"
-        f.write(line)
-        written += len(line.encode("utf-8"))
-        for t in CONTENT_TABLES:
-            cols = [r[1] for r in store.conn.execute(f"PRAGMA table_info({t})")]
-            for row in store.conn.execute(f"SELECT * FROM {t}"):
-                line = json.dumps({"table": t, "row": _encode_row(cols, row)},
-                                  ensure_ascii=False) + "\n"
-                f.write(line)
-                written += len(line.encode("utf-8"))
+    with store.read_locked():
+        counts = {t: store.conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
+                  for t in CONTENT_TABLES}
+        header = {"format": FORMAT,
+                  "schema_version": store.meta_get("schema_version") or "1",
+                  "exported_at": time.time(), "source_db": store._db_path,
+                  "counts": counts}
+        written = 0
+        with out_path.open("w", encoding="utf-8") as f:
+            line = json.dumps(header, ensure_ascii=False) + "\n"
+            f.write(line)
+            written += len(line.encode("utf-8"))
+            for t in CONTENT_TABLES:
+                cols = [r[1] for r in store.conn.execute(f"PRAGMA table_info({t})")]
+                for row in store.conn.execute(f"SELECT * FROM {t}"):
+                    line = json.dumps({"table": t, "row": _encode_row(cols, row)},
+                                      ensure_ascii=False) + "\n"
+                    f.write(line)
+                    written += len(line.encode("utf-8"))
     return {"path": str(out_path), "bytes": written, "counts": counts,
             "schema_version": header["schema_version"], "format": FORMAT,
             "archive_included": False, "streaming": True}

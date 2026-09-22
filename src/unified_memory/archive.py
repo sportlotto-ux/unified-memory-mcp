@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from urllib.parse import quote
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS ar_messages(
@@ -59,7 +60,10 @@ def audit(store, path) -> dict:
     out["stubs"] = len(stubs)
     arch_ids: set = set()
     if out["file_exists"]:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        # file:-URI: путь экранируем (?/# в имени иначе ломают mode=ro).
+        # safe="/:" — слэши и буква диска остаются как есть.
+        uri = f"file:{quote(str(path), safe='/:')}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True)
         try:
             try:
                 arch_ids = {r[0] for r in conn.execute("SELECT id FROM ar_messages")}

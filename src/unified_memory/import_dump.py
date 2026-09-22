@@ -7,7 +7,10 @@
 - Аддитивность: ни одного UPDATE существующих строк. Слот-конфликт
   (owner, category, name) → skip + счётчик. um_meta не вставляется (из дампа
   читается только schema_version).
-- Вектора — из дампа, пересчёта нет (импорт работает без backend).
+- Вектора — из дампа, пересчёта нет (импорт работает без backend). Чужая dim →
+  skip + dim_mismatch в отчёте (иначе recall.len-фильтр молча не находит).
+  После транзакции — build_vec_index() (коммитит внутри, в контур нельзя):
+  knn-плечо видит импортированные вектора сразу, backend не нужен.
 - Без redaction-гейта: контент уже пост-redaction, повторный _clean покалечил бы
   плейсхолдеры.
 - Валидация: неизвестная/новейшая schema_version → отказ; неизвестная таблица →
@@ -30,7 +33,7 @@ import json
 from pathlib import Path
 
 from .config import load
-from .store import Store
+from .store import Store, vec_extension_available
 
 FORMAT = "um-export-jsonl"
 SUPPORTED = ("1",)
@@ -42,6 +45,42 @@ IMPORT_TABLES = ("um_entities", "um_facts", "um_messages", "um_summaries",
 # их содержат), при импорте игнорируются: FTS пересобирается, vecidx — reindex.
 IGNORED = ("um_meta", "um_fts", "um_vecidx")
 KNOWN = set(IMPORT_TABLES) | set(IGNORED)
+
+
+def _decode_emb(emb) -> bytes:
+    """embedding дампа → bytes. Битый base64/тип — b'' (не исключение: импорт
+    аддитивный, одна битая строка не должна ронять весь дамп)."""
+    try:
+        if isinstance(emb, str):
+            return base64.b64decode(emb)
+        return bytes(emb)
+    except Exception:
+        return b""
+
+
+def _blob_dim(blob: bytes) -> int:
+    """dim float32-blobа (0 = не вектор)."""
+    if blob and len(blob) % 4 == 0:
+        return len(blob) // 4
+    return 0
+
+
+def _target_vec_dim(store, dump_rows) -> int:
+    """Эталон dim для импорта: активный индекс → первый вектор стора → первый
+    валидный вектор дампа. 0 = векторов нигде нет (валидировать не с чем)."""
+    raw = store.meta_get("vec_index_dim")
+    if raw and raw.isdigit() and int(raw) > 0:
+        return int(raw)
+    ex = store.conn.execute("SELECT embedding FROM um_vectors LIMIT 1").fetchone()
+    if ex:
+        d = _blob_dim(bytes(ex[0]))
+        if d:
+            return d
+    for r in dump_rows:
+        d = _blob_dim(_decode_emb(r.get("embedding")))
+        if d:
+            return d
+    return 0
 
 
 def read_dump(path: str | Path) -> tuple[str, dict[str, list[dict]]]:
@@ -209,15 +248,20 @@ def _links(store, rows, maps, owner, rep):
         rep["um_links"]["inserted"] += 1
 
 
-def _vectors(store, rows, maps, owner, rep):
+def _vectors(store, rows, maps, owner, rep, target_dim):
     for r in rows:
         ot = r["owner_table"]
         nid = maps.get(ot, {}).get(r["owner_id"])
         if nid is None:  # контент не вставлен → вектор не нужен
             rep["um_vectors"]["skipped"] += 1
             continue
-        emb = r["embedding"]
-        blob = base64.b64decode(emb) if isinstance(emb, str) else bytes(emb)
+        blob = _decode_emb(r.get("embedding"))
+        d = _blob_dim(blob)
+        if not d or (target_dim and d != target_dim):
+            # Чужая размерность (или битый blob): recall.len-фильтр её бы молча
+            # не нашёл — считаем вслух, в отчёт, не вставляем.
+            rep["um_vectors"]["dim_mismatch"] += 1
+            continue
         store.conn.execute(
             "INSERT INTO um_vectors(owner_table, owner_id, embedding, model, owner)"
             " VALUES(?,?,?,?,?)",
@@ -232,6 +276,9 @@ def import_dump(store: Store, path: str | Path, owner: str | None = None,
         raise ValueError(
             f"unsupported dump schema_version {sv!r}; supported {SUPPORTED}")
     rep = {t: {"inserted": 0, "skipped": 0} for t in IMPORT_TABLES}
+    rep["um_vectors"]["dim_mismatch"] = 0
+    vec_rows = tables.get("um_vectors", [])
+    target_dim = _target_vec_dim(store, vec_rows)
     with store.transaction(dry_run=dry_run):
         emap = _entities(store, tables.get("um_entities", []), owner, rep)
         fmap = _facts(store, tables.get("um_facts", []), owner, rep)
@@ -241,8 +288,19 @@ def import_dump(store: Store, path: str | Path, owner: str | None = None,
         maps = {"um_entities": emap, "um_facts": fmap, "um_messages": mmap,
                 "um_summaries": smap, "um_edges": edgemap}
         _links(store, tables.get("um_links", []), maps, owner, rep)
-        _vectors(store, tables.get("um_vectors", []), maps, owner, rep)
+        _vectors(store, vec_rows, maps, owner, rep, target_dim)
         store.rebuild_fts()
+    # build_vec_index коммитит внутри — только ПОСЛЕ транзакции (guardrail: commit
+    # внутри разорвал бы контур). Backend не нужен: источник — um_vectors,
+    # требуется лишь extra local-vec. Без вставленных векторов индекс не трогаем.
+    if not dry_run and rep["um_vectors"]["inserted"]:
+        if vec_extension_available():
+            try:
+                rep["vec_index"] = store.build_vec_index(target_dim)
+            except Exception as e:
+                rep["vec_index_error"] = f"{type(e).__name__}: {e}"[:200]
+        else:
+            rep["vec_index"] = "skipped_no_local_vec"
     rep["schema_version"] = sv
     rep["dry_run"] = dry_run
     rep["totals"] = {

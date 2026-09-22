@@ -225,6 +225,9 @@ def estimate_tokens(text: str) -> int:
     return max(1, (ascii_n + 3) // 4 + (other + 1) // 2)
 
 
+_KIND_RANK = {"um_messages": 0, "um_summaries": 1}
+
+
 def _locked(fn):
     import functools
 
@@ -400,6 +403,17 @@ class Store:
             raise
         self.conn.execute(f"RELEASE SAVEPOINT {name}")
         self._sp_stack.pop()
+
+    @contextmanager
+    def read_locked(self):
+        """Публичный RLock для внешних построчных сканеров (export, secret_scan).
+
+        FastMCP-треды делят один conn: проход без лока — гонка итератора с
+        писателем. RLock реентерабелен — безопасно вызывать из-под @_locked.
+        Долгие сканы сериализуют писателей: цена консистентности прохода.
+        """
+        with self._lock:
+            yield self.conn
 
     @contextmanager
     def transaction(self, dry_run: bool = False):
@@ -1111,18 +1125,26 @@ class Store:
     @_locked
     def recent(self, start_ts: float, end_ts: float, session_id: str = "",
                owner: str = "", limit: int = 20,
-               before_ts: float = 0.0, before_id: int = 0) -> list[dict]:
+               before_ts: float = 0.0, before_id: int = 0,
+               before_kind: str = "") -> list[dict]:
         """Temporal выборка поверх messages+summaries: [start, end), свежие first.
 
-        D14-пагинация: (before_ts, before_id) — эксклюзивный курсор «строго
-        старше» (timeline сливает две таблицы, один id неоднозначен). 0/0 = первая
-        страница."""
+        D14-пагинация: (before_ts, before_id, before_kind) — эксклюзивный курсор
+        «строго старше». kind — тайбрейкер полного (created_at, id)-тия между
+        таблицами: глобальный порядок (created_at DESC, id DESC, kind-rank DESC;
+        summaries раньше messages), курсор — «строго после позиции»
+        (own_rank < brank). before_kind="" (legacy) → rank 0: вся (ts, id)-
+        группа исключена — поведение до тайбрейкера, бит-в-бит."""
         out: list[dict] = []
-        cur = ""
+        cur_m = cur_s = ""
         curs: list = []
         if before_ts or before_id:
-            cur = " AND (created_at < ? OR (created_at = ? AND id < ?))"
-            curs = [before_ts, before_ts, before_id]
+            brank = _KIND_RANK.get(before_kind, 0)
+            tmpl = (" AND (created_at < ? OR (created_at = ? AND (id < ?"
+                    " OR (id = ? AND {rk} < ?))))")
+            cur_m = tmpl.format(rk=_KIND_RANK["um_messages"])
+            cur_s = tmpl.format(rk=_KIND_RANK["um_summaries"])
+            curs = [before_ts, before_ts, before_id, before_id, brank]
         mq = ("SELECT id, session_id, content, created_at FROM um_messages"
               " WHERE created_at >= ? AND created_at < ?")
         mp: list = [start_ts, end_ts]
@@ -1134,7 +1156,7 @@ class Store:
             mp.append(owner)
         mq += " AND (externalized_ref IS NULL OR externalized_ref='')"
         for mid, sid, body, ts in self.conn.execute(
-                mq + cur + " ORDER BY created_at DESC, id DESC LIMIT ?",
+                mq + cur_m + " ORDER BY created_at DESC, id DESC LIMIT ?",
                 (*mp, *curs, limit)):
             out.append({"kind": "um_messages", "id": mid, "session_id": sid,
                         "body": body, "created_at": ts})
@@ -1148,11 +1170,12 @@ class Store:
             sq += " AND owner=?"
             sp.append(owner)
         for sid_, ssid, body, ts in self.conn.execute(
-                sq + cur + " ORDER BY created_at DESC, id DESC LIMIT ?",
+                sq + cur_s + " ORDER BY created_at DESC, id DESC LIMIT ?",
                 (*sp, *curs, limit)):
             out.append({"kind": "um_summaries", "id": sid_, "session_id": ssid,
                         "body": body, "created_at": ts})
-        out.sort(key=lambda r: (-r["created_at"], -r["id"]))
+        out.sort(key=lambda r: (-r["created_at"], -r["id"],
+                                 -_KIND_RANK[r["kind"]]))
         return out[:limit]
 
     @_locked

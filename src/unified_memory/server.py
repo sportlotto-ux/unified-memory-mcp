@@ -313,12 +313,14 @@ def mem_reindex(owner: str = "") -> str:
 @mcp.tool(annotations=_ann(ro=True, idem=True))
 def mem_recent(period: str = "today", session_id: str = "",
                owner: str = "", limit: int = 20,
-               before_id: int = 0, before_ts: float = 0.0) -> str:
+               before_id: int = 0, before_ts: float = 0.0,
+               before_kind: str = "") -> str:
     """Temporal: what happened in a UTC window. Period: today | yesterday | week | month | Nd | date:YYYY-MM-DD | last Nh.
-    Paging: pass the returned next.before_id + next.before_ts to get the next (older) page."""
+    Paging: pass the returned next.before_ts + next.before_id + next.before_kind to get the next (older) page."""
     window = parse_period(period)
     items = _store().recent(window.start_ts, window.end_ts, session_id, owner, limit,
-                            before_ts=before_ts, before_id=before_id)
+                            before_ts=before_ts, before_id=before_id,
+                            before_kind=before_kind)
     out = []
     for it in items:
         body = it["body"][:2000]
@@ -326,7 +328,8 @@ def mem_recent(period: str = "today", session_id: str = "",
             body += "…[truncated, use mem_expand for full text]"
         out.append({"kind": it["kind"], "id": it["id"], "session": it["session_id"],
                     "created_at": it["created_at"], "body": body})
-    nxt = ({"before_ts": items[-1]["created_at"], "before_id": items[-1]["id"]}
+    nxt = ({"before_ts": items[-1]["created_at"], "before_id": items[-1]["id"],
+            "before_kind": items[-1]["kind"]}
            if len(items) == limit and items else None)
     return json.dumps({"period": period, "window": {
         "start": window.start_ts, "end": window.end_ts}, "items": out,
@@ -432,18 +435,19 @@ def _secret_scan(store, patterns, cap: int = 50) -> dict:
                ("um_edges", "predicate")]
     hits: list = []
     total = 0
-    for table, col in sources:
-        for oid, text in store.conn.execute(
-                f"SELECT id, {col} FROM {table} WHERE {col} IS NOT NULL"):
-            if not text:
-                continue
-            for name in active:
-                if name == "private_key" and "PRIVATE KEY" not in text.upper():
+    with store.read_locked():  # проход мимо _locked-методов: лочим явно
+        for table, col in sources:
+            for oid, text in store.conn.execute(
+                    f"SELECT id, {col} FROM {table} WHERE {col} IS NOT NULL"):
+                if not text:
                     continue
-                if PATTERNS[name].search(text):
-                    total += 1
-                    if len(hits) < cap:
-                        hits.append({"pattern": name, "kind": table, "id": oid})
+                for name in active:
+                    if name == "private_key" and "PRIVATE KEY" not in text.upper():
+                        continue
+                    if PATTERNS[name].search(text):
+                        total += 1
+                        if len(hits) < cap:
+                            hits.append({"pattern": name, "kind": table, "id": oid})
     return {"hits": hits, "total": total, "cap": cap, "patterns": active}
 
 
