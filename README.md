@@ -1,4 +1,4 @@
-# hermes-unified-memory
+# unified-memory-mcp
 
 Один MCP-сервер вместо двух: **хранение + поиск + сжатие** информации для любого MCP-клиента (Hermes Agent, Claude Code, ...).
 
@@ -12,8 +12,8 @@
 ## Установка
 
 ```bash
-git clone https://github.com/<you>/hermes-unified-memory
-cd hermes-unified-memory
+git clone https://github.com/sportlotto-ux/unified-memory-mcp
+cd unified-memory-mcp
 pip install -e .                    # база: FTS-поиск + extractive-сжатие, всё из коробки
 pip install -e .[local-embed]       # + семантика: локальный fastembed, CPU, без облаков
 ```
@@ -57,7 +57,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
     "unified-memory": {
       "command": "python",
       "args": ["-m", "unified_memory.server"],
-      "cwd": "/path/to/hermes-unified-memory",
+      "cwd": "/path/to/unified-memory-mcp",
       "env": { "UM_DATABASE_PATH": "~/.hermes/unified_memory.db" }
     }
   }
