@@ -130,7 +130,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 | `UM_DAG_FANIN` | `5` | Нод уровня → одна выше |
 | `UM_ASSEMBLY_BUDGET` | `8000` | Токенов в `mem_assemble` по дефолту |
 
-## Известные ограничения (v0.6)
+## Известные ограничения (v0.7)
 
 Полный список отложенного — `docs/BACKLOG.md`.
 
@@ -145,7 +145,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 ## Разработка
 
 ```bash
-python -m pytest tests/ -q   # 175 passed, 4 skipped без fastembed/vec; UM_LIVE_OPENAI=1 — live против 8127
+python -m pytest tests/ -q   # 229 passed, 4 skipped без fastembed/vec; UM_LIVE_OPENAI=1 — live против 8127
 ```
 
 Прогон герметичен: `tests/conftest.py` снимает ambient `UM_*` (иначе шелл с
