@@ -64,7 +64,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 }
 ```
 
-## Тулы (12)
+## Тулы (13)
 
 | Тул | Что делает |
 |---|---|
@@ -72,9 +72,10 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 | `mem_fact` | Слот-факт (одно живое значение на `owner/category/name`) + опциональный триплет графа; то же тело — no-op, новое — supersede с историей |
 | `mem_update` | Правка факта по id (новая версия, history живёт) или истечение/reopen факта/ребра (`valid_until`) |
 | `mem_recall` | Единый поиск: FTS + вектора + граф (1-hop) + RRF. `scope`: `all`/`session`/`facts`; `as_of` — срез графа на дату; `include_expired` — история |
-| `mem_expand` | Дословно по `kind`+`id`, единая схема `{kind,id,body}` |
-| `mem_reindex` | Доложит недостающие вектора (лестница после смены модели) |
 | `mem_recent` | Temporal: что было в UTC-окне (`today`/`week`/`Nd`/`date:`/`last Nh`) |
+| `mem_expand` | Дословно по `kind`+`id`, единая схема `{kind,id,body}` |
+| `mem_evidence` | Проверка опоры на refs: `cite` (дословно/почти → supported/partial/unsupported), `compute` (агрегация чисел над refs: count/sum/min/max/avg/median), `conflicts` (кандидаты противоречий без вердикта, `needs_judgment`). Без LLM, только переданные refs |
+| `mem_reindex` | Доложит недостающие вектора (лестница после смены модели) |
 | `mem_compact` | Ручное сжатие старых сообщений (сырьё остаётся) |
 | `mem_assemble` | Bounded активный контекст: summaries + свежий хвост в бюджет токенов |
 | `mem_forget` | Удаление по `kind`: `fact`/`edge` (id) или `entity` (имя), каскадом |
@@ -91,6 +92,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 - **Redaction:** гейт на входе (`UM_REDACT_ENABLED`, дефолт ON): `api_key,bearer_token,password_assignment,private_key` — каталог и регулярки как у LCM. Режется до SQLite/FTS/vectors/summaries, плейсхолдер `[UM redaction: name=...; chars=N]` необратим. Forward-only: что попало в стор раньше — чистить руками + reindex.
 - **Retention/архив (lossless-холод):** `UM_RETENTION_DAYS` = **сколько держать ГОРЯЧЕЕ** (recall быстрый, БД маленькая), а не срок жизни данных. `0` (дефолт) = копим всё в горячей вечно. `>0` → раз в неделю (ленивый проход) горячее старше N дней уезжает в архив. Архив — **отдельный файл, lossless**, живёт вечно; **автоудаления нет** — физическое `purge` только вручную (`mem_doctor(mode=purge, apply=true)`). При пороге размера (`UM_ARCHIVE_SIZE_MB`, дефолт 1 ГБ) старейшее добивается до порога. В архив уезжают текст **и вектор** (вариант a2 — так порог реально держится), в горячей остаётся заглушка `[archived]`, `mem_expand` прозрачно достаёт текст из архива.
 - **Факты = слоты (`mem_fact`), сообщения = лог (`mem_remember`).** Один живой факт на `(owner, category, name)` — гарантирует partial unique index, не код. Новое тело вытесняет старое (`valid_until`, `superseded_by`), история lossless; `valid_until=0` = живое (sentinel). `mem_recall`/`mem_expand` прячут истёкшее (`include_expired=True` — аудит). `mem_forget` — жёсткое удаление, истечение — только `mem_update`.
+- **Проверка и арифметика (`mem_evidence`).** Детерминированно, без LLM, **только над переданными `refs`** (никакого авто-поиска — иначе инструмент превращается в мини-агента с его fallback-багами). `cite`: дословное/почти-дословное вхождение claim в тело ref → `supported/partial/unsupported` (RU-морфология через дешёвый prefix-stem). `compute`: агрегация чисел из тел тех же refs (`count/sum/min/max/avg/median`); интент парсит хост-агент. `conflicts`: высокоточные кандидаты противоречий (смена значения в слоте, точная негация) **без вердикта** — судью делает LLM-хост, тул не шумит.
 
 ## Переменные окружения
 
@@ -107,6 +109,9 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 | `UM_ARCHIVE_SIZE_MB` | `1024` | Порог горячей БД: старейшие сообщения уезжают в архив |
 | `UM_ARCHIVE_PATH` | `~/.hermes/unified_memory.archive.db` | Отдельный файл холода |
 | `UM_ARCHIVE_BATCH` | `500` | Сколько сообщений за один проход архивации |
+| `UM_EVIDENCE_MAX_REFS` | `50` | `mem_evidence`: максимум refs за вызов (лишние — в `rejections`) |
+| `UM_EVIDENCE_MAX_CHARS` | `8000` | `mem_evidence`: сколько символов тела брать из каждого ref |
+| `UM_EVIDENCE_PARTIAL` | `0.5` | `mem_evidence(cite)`: порог покрытия токенов для `partial` |
 | `UM_REDACT_ENABLED` | `true` | Гейт секретов на входе (дефолт ON — продукт публичный) |
 | `UM_REDACT_PATTERNS` | `api_key,bearer_token,password_assignment,private_key` | Подмножество каталога через запятую |
 | `UM_SUMMARIZER_URL` / `UM_SUMMARIZER_MODEL` | — | LLM-пересказ; без них extractive |

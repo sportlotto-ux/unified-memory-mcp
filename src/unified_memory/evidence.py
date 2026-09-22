@@ -178,6 +178,65 @@ def run_cite(store, claim: str, refs: list[str], owner: str = "",
             "refs": refs_out, "rejections": rejections}
 
 
+def _slot_prefix(s: str) -> str:
+    """Срезает 'name: ' у факта, чтобы сравнивать значение, а не обёртку."""
+    return re.sub(r"^[^:]{1,40}:\s*", "", _norm(s))
+
+
+def _is_negation(a: str, b: str) -> bool:
+    a, b = _slot_prefix(a), _slot_prefix(b)
+    if not a or not b or a == b:
+        return False
+    return any(a == neg + b or b == neg + a for neg in ("не ", "not "))
+
+
+def run_conflicts(store, refs: list[str], owner: str = "", max_refs: int = 50,
+                  max_chars: int = 8000,
+                  archived_fetch: Callable[[str, int], str | None] | None = None) -> dict:
+    """Кандидаты противоречий среди refs — БЕЗ вердикта. Судья — хост-агент.
+
+    Только высокоточные сигналы: (1) slot_versions — refs одного
+    (owner,category,name) слота с разными телами (смена значения во времени);
+    (2) negation — тело A дословно равно «не » + тело B. Любой кандидат несёт
+    needs_judgment=true: тул не утверждает конфликт, лишь указывает пару.
+    """
+    rows, rejections = _resolve(store, refs, owner, max_refs, max_chars,
+                                archived_fetch)
+    candidates: list[dict] = []
+    slots = store.fact_slots([k for k, _, _ in rows])
+    by_slot: dict[tuple, list[tuple[tuple[str, int], str]]] = {}
+    for key, body, _ in rows:
+        meta = slots.get(key)
+        if meta:
+            by_slot.setdefault((meta["owner"], meta["category"],
+                                meta["name"]), []).append((key, meta["body"]))
+    for slot, items in by_slot.items():
+        for i in range(len(items)):
+            for j in range(i + 1, len(items)):
+                (k1, b1), (k2, b2) = items[i], items[j]
+                if _norm(b1) != _norm(b2):
+                    candidates.append({
+                        "reason_code": "slot_versions",
+                        "slot": {"owner": slot[0], "category": slot[1],
+                                 "name": slot[2]},
+                        "refs": [{"kind": k1[0], "id": k1[1]},
+                                 {"kind": k2[0], "id": k2[1]}],
+                        "bodies": [b1[:max_chars], b2[:max_chars]]})
+    for i in range(len(rows)):
+        for j in range(i + 1, len(rows)):
+            k1, b1, _ = rows[i]
+            k2, b2, _ = rows[j]
+            if _is_negation(b1, b2):
+                candidates.append({
+                    "reason_code": "negation",
+                    "refs": [{"kind": k1[0], "id": k1[1]},
+                             {"kind": k2[0], "id": k2[1]}],
+                    "bodies": [b1[:max_chars], b2[:max_chars]]})
+    return {"mode": "conflicts", "candidates": candidates,
+            "count": len(candidates), "needs_judgment": True,
+            "rejections": rejections}
+
+
 def run_compute(store, refs: list[str], op: str = "count", pattern: str = "",
                 owner: str = "", max_refs: int = 50, max_chars: int = 8000,
                 archived_fetch: Callable[[str, int], str | None] | None = None) -> dict:

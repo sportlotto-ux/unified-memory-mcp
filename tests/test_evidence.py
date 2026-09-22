@@ -11,7 +11,8 @@ import pytest
 
 from unified_memory import archive
 from unified_memory.config import Config
-from unified_memory.evidence import coverage, parse_ref, run_cite, run_compute
+from unified_memory.evidence import (coverage, parse_ref, run_cite,
+                                     run_compute, run_conflicts)
 from unified_memory.store import Store
 
 DAY = 86400
@@ -189,6 +190,46 @@ def test_compute_owner_isolation(store):
     assert out["rejections"][0]["reason_code"] == "owner_mismatch"
 
 
+# ---------- conflicts (verdict-free) ----------
+
+def test_conflicts_slot_versions(store):
+    old = store.add_fact("city", "capital", "Москва")
+    new = store.update_fact(old, body="Санкт-Петербург")["id"]
+    out = run_conflicts(store, [f"fact:{old}", f"fact:{new}"])
+    assert out["needs_judgment"] is True
+    assert out["count"] == 1
+    cand = out["candidates"][0]
+    assert cand["reason_code"] == "slot_versions"
+    assert cand["slot"]["name"] == "capital"
+
+
+def test_conflicts_negation(store):
+    a = store.add_fact("c", "a", "Москва столица")
+    b = store.add_fact("c", "b", "не Москва столица")
+    out = run_conflicts(store, [f"fact:{a}", f"fact:{b}"])
+    assert any(c["reason_code"] == "negation" for c in out["candidates"])
+
+
+def test_conflicts_no_false_positive(store):
+    a = store.add_fact("c", "a", "Москва")
+    b = store.add_fact("c", "b", "Московская область")
+    out = run_conflicts(store, [f"fact:{a}", f"fact:{b}"])
+    assert out["count"] == 0
+
+
+def test_conflicts_only_caller_refs(store):
+    a = store.add_fact("c", "a", "Москва")
+    store.add_fact("c", "a2", "не Москва")  # скрытый оппонент, не передан
+    out = run_conflicts(store, [f"fact:{a}"])
+    assert out["count"] == 0
+
+
+def test_conflicts_records_rejections(store):
+    out = run_conflicts(store, ["мусор", "fact:99999"])
+    assert {r["reason_code"] for r in out["rejections"]} == {"bad_ref", "not_found"}
+    assert out["count"] == 0
+
+
 # ---------- config + server wiring ----------
 
 def test_evidence_config_defaults_and_validation(tmp_path):
@@ -220,6 +261,11 @@ def test_server_mem_evidence_wiring(tmp_path, monkeypatch):
         nums = json.loads(m.mem_evidence(mode="compute", refs=[f"fact:{bids[0]}"],
                                          op="count"))
         assert nums["result"] == 1
+        new_id = json.loads(m.mem_update(kind="fact", id=fid,
+                                         body="Санкт-Петербург"))["id"]
+        conf = json.loads(m.mem_evidence(mode="conflicts",
+                                         refs=[f"fact:{fid}", f"fact:{new_id}"]))
+        assert conf["needs_judgment"] is True and conf["count"] == 1
         with pytest.raises(ValueError):
             m.mem_evidence(mode="nope", refs=[f"fact:{fid}"])
     finally:

@@ -896,6 +896,21 @@ class Store:
         return out
 
     @_locked
+    def fact_slots(self, refs: list[tuple[str, int]]) -> dict[tuple[str, int], dict]:
+        """(owner, category, name, body) для um_facts refs — для conflict-detect."""
+        ids = [oid for ot, oid in refs if ot == "um_facts"]
+        out: dict[tuple[str, int], dict] = {}
+        if not ids:
+            return out
+        ph = ",".join("?" * len(ids))
+        for oid, owner, cat, name, body in self.conn.execute(
+                f"SELECT id, owner, category, name, body FROM um_facts"
+                f" WHERE id IN ({ph})", ids):
+            out[("um_facts", oid)] = {"owner": owner or "", "category": cat,
+                                      "name": name, "body": body}
+        return out
+
+    @_locked
     def created_for(self, refs: list[tuple[str, int]]) -> dict[tuple[str, int], float]:
         """Batch timestamps для recency-приора: 1 запрос на таблицу, не N+1."""
         out: dict[tuple[str, int], float] = {}

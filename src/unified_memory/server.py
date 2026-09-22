@@ -30,7 +30,7 @@ from unified_memory.store import Store  # noqa: E402
 from unified_memory.summarize import default_summarizer  # noqa: E402
 from unified_memory import archive  # noqa: E402
 from unified_memory.recent import parse_as_of, parse_period, parse_when  # noqa: E402
-from unified_memory.evidence import run_cite, run_compute  # noqa: E402
+from unified_memory.evidence import run_cite, run_compute, run_conflicts  # noqa: E402
 
 mcp = _Server("unified-memory")
 
@@ -292,6 +292,7 @@ def mem_evidence(claim: str = "", refs: list[str] | None = None,
                  pattern: str = "", owner: str = "") -> str:
     """Verify a claim against refs (mode=cite → supported|partial|unsupported)
     or aggregate numbers over refs (mode=compute, op=count|sum|min|max|avg|median).
+    mode=conflicts → verdict-free кандидаты противоречий (needs_judgment).
     Only the refs you pass are used — no auto-search. refs like 'fact:3'."""
     _ingest()
     cfg = _STATE["cfg"]
@@ -307,8 +308,13 @@ def mem_evidence(claim: str = "", refs: list[str] | None = None,
                           owner=owner, max_refs=cfg.evidence_max_refs,
                           max_chars=cfg.evidence_max_chars,
                           archived_fetch=_archive_fetch(cfg))
+    elif mode == "conflicts":
+        out = run_conflicts(_STATE["store"], refs, owner=owner,
+                            max_refs=cfg.evidence_max_refs,
+                            max_chars=cfg.evidence_max_chars,
+                            archived_fetch=_archive_fetch(cfg))
     else:
-        raise ValueError(f"unknown mode {mode!r}: cite | compute")
+        raise ValueError(f"unknown mode {mode!r}: cite | compute | conflicts")
     return json.dumps(out, ensure_ascii=False)
 
 
