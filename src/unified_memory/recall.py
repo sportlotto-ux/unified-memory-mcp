@@ -50,7 +50,8 @@ class Router:
     def recall(self, query: str, scope: str = "all", session_id: str = "",
                limit: int = 10, owner: str = "",
                include_expired: bool = False,
-               as_of: float | None = None) -> list[Hit]:
+               as_of: float | None = None,
+               hops: int = 1, rel: str = "") -> list[Hit]:
         if scope not in VALID_SCOPES:
             raise ValueError(f"unknown scope {scope!r}: {VALID_SCOPES}")
         if limit <= 0:
@@ -114,8 +115,15 @@ class Router:
             scored.sort(key=lambda h: -h.score)
             if scored:
                 lists.append(scored[:limit * 2])
-        graph_hits = self._graph_arm(query, scope, session_id, limit * 2, owner,
-                                     include_expired, as_of)
+        if hops > 1:
+            # guardrail 1: старый _graph_arm не тронут; BFS — отдельная ветка.
+            seeds = [(h.owner_table, h.owner_id) for lst in lists for h in lst]
+            graph_hits = self._graph_bfs(query, scope, session_id, limit * 2,
+                                         owner, include_expired, as_of, hops,
+                                         rel, seeds)
+        else:
+            graph_hits = self._graph_arm(query, scope, session_id, limit * 2, owner,
+                                         include_expired, as_of)
         if graph_hits:
             lists.append(graph_hits)
         if not lists:
@@ -195,3 +203,96 @@ class Router:
                 if len(hits) >= limit:
                     return hits
         return hits
+
+    def _graph_bfs(self, query: str, scope: str, session_id: str, limit: int,
+                   owner: str, include_expired: bool, as_of: float | None,
+                   hops: int, rel: str,
+                   seeds: list[tuple[str, int]]) -> list[Hit]:
+        """BFS по um_links ∪ um_edges для hops>1 (ADR-001 D5, guardrails п.4).
+
+        Узел = (table, id); сущности traversal-only. Скоринг decay**(depth-1):
+        hop=1 → 1.0 (как старый _graph_arm), hop=2 → decay. Fan-out и общий
+        потолок limit — остановка. visited-set против циклов A→B→A.
+        """
+        max_hops = max(1, min(int(hops), self.cfg.recall_max_hops))
+        decay = self.cfg.graph_decay
+        fanout = self.cfg.link_fanout
+        filt = (rel or "").strip().lower()
+        sess = session_id if scope == "session" else ""
+        ent = "um_entities"
+        content = ("um_messages", "um_facts", "um_summaries", "um_edges")
+        seed_keys = {(t, i) for t, i in seeds}
+        visited: set[tuple[str, int]] = set()
+        node_cap = max(limit * fanout, 100)  # страховка от dense-взрыва
+        queue: list[tuple[str, int, int]] = []
+        emitted: dict[tuple[str, int], tuple[float, str, str]] = {}
+
+        def enqueue(table: str, oid: int, depth: int) -> None:
+            key = (table, oid)
+            if key not in visited and len(visited) < node_cap:
+                visited.add(key)
+                queue.append((table, oid, depth))
+
+        for t, i in seeds:
+            if t in content:
+                enqueue(t, i, 0)
+        if scope != "facts":
+            for eid in self.store.match_entity_ids(tokenize(query), limit=5,
+                                                   owner=owner):
+                enqueue(ent, eid, 0)
+
+        head = 0
+        while head < len(queue):
+            table, oid, depth = queue[head]
+            head += 1
+            if depth >= max_hops:
+                continue
+            nd = depth + 1
+            score = decay ** (nd - 1)  # hop=1 → 1.0
+            if table == ent:
+                for st in self.store.edge_steps_of_entity(
+                        oid, owner=owner, include_expired=include_expired,
+                        as_of=as_of, session_id=sess, predicate=filt, limit=100):
+                    ekey = ("um_edges", st["edge_id"])
+                    if ekey not in emitted and ekey not in seed_keys:
+                        body, msid = self.store._body_of("um_edges", st["edge_id"])
+                        if body is not None:
+                            emitted[ekey] = (score, body, msid or "")
+                    enqueue("um_edges", st["edge_id"], nd)
+                    enqueue(ent, st["other_id"], nd)
+                    if len(emitted) >= limit:
+                        break
+            else:
+                if table == "um_facts":  # мост fact→entities (traversal-only)
+                    for br in self.store.entity_ids_for_fact(oid, owner=owner):
+                        enqueue(ent, br["subject_id"], nd)
+                        enqueue(ent, br["object_id"], nd)
+                self._bfs_links(table, oid, nd, score, owner, include_expired,
+                                as_of, filt, sess, fanout, seed_keys, emitted,
+                                enqueue, limit)
+            if len(emitted) >= limit:
+                break
+
+        hits = [Hit(k[0], k[1], v[1], v[0], v[2]) for k, v in emitted.items()]
+        hits.sort(key=lambda h: -h.score)
+        return hits[:limit]
+
+    def _bfs_links(self, table: str, oid: int, nd: int, score: float,
+                   owner: str, include_expired: bool, as_of: float | None,
+                   filt: str, sess: str, fanout: int,
+                   seed_keys: set, emitted: dict, enqueue, limit: int) -> None:
+        """Расширение узла по um_links: liveness линка (в link_neighbors) +
+        liveness узла-назначения (node_ok) — guardrail 4."""
+        for nb in self.store.link_neighbors(
+                table, oid, owner=owner, include_expired=include_expired,
+                as_of=as_of, rel=filt, session_id=sess, limit=fanout):
+            nt, nid = nb["table"], nb["id"]
+            key = (nt, nid)
+            if key not in emitted and key not in seed_keys \
+                    and self.store.node_ok(nt, nid, owner, include_expired, as_of):
+                found = self.store.bodies_for([(nt, nid)]).get((nt, nid))
+                if found and found[0] is not None:
+                    emitted[key] = (score, found[0], found[1])
+            enqueue(nt, nid, nd)
+            if len(emitted) >= limit:
+                return

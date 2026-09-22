@@ -1380,6 +1380,142 @@ class Store:
         return True
 
     @_locked
+    def node_ok(self, table: str, oid: int, owner: str = "",
+                include_expired: bool = False, as_of: float | None = None) -> bool:
+        """Виден ли узел (table,id) при owner/include_expired/as_of.
+        Архивные заглушки сообщений скрыты, как в остальных руках recall."""
+        if table == "um_messages":
+            row = self.conn.execute(
+                "SELECT owner, externalized_ref FROM um_messages WHERE id=?",
+                (oid,)).fetchone()
+            if not row or row[1]:
+                return False
+            return not owner or (row[0] or "") == owner
+        if table == "um_summaries":
+            row = self.conn.execute(
+                "SELECT owner FROM um_summaries WHERE id=?", (oid,)).fetchone()
+            return bool(row) and (not owner or (row[0] or "") == owner)
+        if table in ("um_facts", "um_edges"):
+            row = self.conn.execute(
+                f"SELECT owner, created_at, valid_until FROM {table} WHERE id=?",
+                (oid,)).fetchone()
+            if not row:
+                return False
+            if owner and (row[0] or "") != owner:
+                return False
+            ca, vu = row[1] or 0.0, row[2] or 0.0
+            if as_of is not None:
+                return ca <= as_of and (vu == 0 or vu > as_of)
+            if include_expired:
+                return True
+            return vu == 0 or vu > time.time()
+        return False
+
+    @_locked
+    def link_neighbors(self, table: str, oid: int, owner: str = "",
+                       include_expired: bool = False, as_of: float | None = None,
+                       rel: str = "", session_id: str = "",
+                       limit: int = 20) -> list[dict]:
+        """Соседи узла по um_links в ОБЕ стороны (ADR-001 D5). Не более limit
+        на направление. Liveness линка проверяется здесь; узла-назначения — вызывающим."""
+        now = time.time()
+        out: list[dict] = []
+        dirs = (("src_table=? AND src_id=?",
+                 "dst_table, dst_id, rel, weight, session_id, created_at, valid_until"),
+                ("dst_table=? AND dst_id=?",
+                 "src_table, src_id, rel, weight, session_id, created_at, valid_until"))
+        for where, cols in dirs:
+            q = f"SELECT {cols} FROM um_links WHERE {where}"
+            p: list = [table, oid]
+            if owner:
+                q += " AND owner=?"
+                p.append(owner)
+            if rel:
+                q += " AND rel=?"
+                p.append(rel)
+            if session_id:
+                q += " AND session_id=?"
+                p.append(session_id)
+            q += " ORDER BY id"
+            got = 0
+            for nt, nid, rl, w, sid, ca, vu in self.conn.execute(q, p):
+                if as_of is not None:
+                    if not (ca <= as_of and (vu == 0 or vu > as_of)):
+                        continue
+                elif not include_expired and not (vu == 0 or vu > now):
+                    continue
+                out.append({"table": nt, "id": nid, "rel": rl, "weight": w,
+                            "session_id": sid or "", "created_at": ca})
+                got += 1
+                if got >= limit:
+                    break
+        return out
+
+    @_locked
+    def edge_steps_of_entity(self, eid: int, owner: str = "",
+                             include_expired: bool = False,
+                             as_of: float | None = None, session_id: str = "",
+                             predicate: str = "", limit: int = 100) -> list[dict]:
+        """Шаг BFS по entity-графу: рёбра сущности + id второго конца."""
+        now = time.time()
+        q = ("SELECT id, subject_id, object_id, predicate, session_id, created_at,"
+             " valid_until FROM um_edges WHERE (subject_id=? OR object_id=?)")
+        p: list = [eid, eid]
+        if owner:
+            q += " AND owner=?"
+            p.append(owner)
+        if session_id:
+            q += " AND session_id=?"
+            p.append(session_id)
+        if predicate:
+            q += " AND predicate=?"
+            p.append(predicate)
+        q += " ORDER BY id LIMIT ?"
+        p.append(limit)
+        out = []
+        for eid2, s, o, pred, sid, ca, vu in self.conn.execute(q, p):
+            if as_of is not None:
+                if not (ca <= as_of and (vu == 0 or vu > as_of)):
+                    continue
+            elif not include_expired and not (vu == 0 or vu > now):
+                continue
+            out.append({"edge_id": eid2, "other_id": o if s == eid else s,
+                        "predicate": pred, "session_id": sid or "",
+                        "created_at": ca})
+        return out
+
+    @_locked
+    def entity_ids_for_fact(self, fid: int, owner: str = "",
+                            limit: int = 20) -> list[dict]:
+        """Мост fact→entities через um_edges.fact_id (ADR-001 D5)."""
+        q = "SELECT subject_id, object_id, predicate FROM um_edges WHERE fact_id=?"
+        p: list = [fid]
+        if owner:
+            q += " AND owner=?"
+            p.append(owner)
+        q += " LIMIT ?"
+        p.append(limit)
+        return [{"subject_id": s, "object_id": o, "predicate": pr}
+                for s, o, pr in self.conn.execute(q, p)]
+
+    @_locked
+    def match_entity_ids(self, terms: list[str], limit: int = 5,
+                         owner: str = "") -> list[int]:
+        """Как match_entities, но возвращает id (нужно для узлов (um_entities,id))."""
+        out: list[int] = []
+        for t in terms[:8]:
+            esc = t.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            q = "SELECT id FROM um_entities WHERE name LIKE ? ESCAPE '\\'"
+            p: list = [f"%{esc}%"]
+            if owner:
+                q += " AND owner=?"
+                p.append(owner)
+            for (eid,) in self.conn.execute(q + " LIMIT ?", (*p, limit)):
+                if eid not in out:
+                    out.append(eid)
+        return out[:limit]
+
+    @_locked
     def neighbors(self, entity_name: str, session_id: str = "",
                   limit: int = 100, owner: str = "",
                   include_expired: bool = False,

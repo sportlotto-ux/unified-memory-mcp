@@ -72,7 +72,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 | `mem_fact` | Слот-факт (одно живое значение на `owner/category/name`) + опциональный триплет графа; то же тело — no-op, новое — supersede с историей |
 | `mem_link` | Типизированная связь (`src`/`dst` как `fact:3`/`message:12`, `rel` ∈ `supports`/`contradicts`/`supersedes`/`derives_from`). Оба конца обязаны существовать и принадлежать `owner`; повтор живой связи — no-op с тем же id |
 | `mem_update` | Правка факта по id (новая версия, history живёт) или истечение/reopen факта/ребра/связи (`valid_until`) |
-| `mem_recall` | Единый поиск: FTS + вектора + граф (1-hop) + RRF. `scope`: `all`/`session`/`facts`; `as_of` — срез графа на дату; `include_expired` — история |
+| `mem_recall` | Единый поиск: FTS + вектора + граф + RRF. `scope`: `all`/`session`/`facts`; `as_of` — срез графа на дату; `include_expired` — история; `hops>1` — BFS-обход типизированных связей и entity-графа, `rel` фильтрует связи (`supports`/`contradicts`/`supersedes`/`derives_from`; на рёбрах — `predicate`) |
 | `mem_recent` | Temporal: что было в UTC-окне (`today`/`yesterday`/`week`/`month`/`Nd`/`date:`/`last Nh`) |
 | `mem_expand` | Дословно по `kind`+`id`, единая схема `{kind,id,body}` |
 | `mem_evidence` | Проверка опоры на refs: `cite` (дословно/почти → supported/partial/unsupported), `compute` (агрегация чисел над refs: count/sum/min/max/avg/median), `conflicts` (кандидаты противоречий без вердикта, `needs_judgment`). Без LLM, только переданные refs |
@@ -114,6 +114,9 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 | `UM_EVIDENCE_MAX_REFS` | `50` | `mem_evidence`: максимум refs за вызов (лишние — в `rejections`) |
 | `UM_EVIDENCE_MAX_CHARS` | `8000` | `mem_evidence`: сколько символов тела брать из каждого ref |
 | `UM_EVIDENCE_PARTIAL` | `0.5` | `mem_evidence(cite)`: порог покрытия токенов для `partial` |
+| `UM_RECALL_MAX_HOPS` | `3` | `mem_recall(hops)`: потолок BFS-обхода связей (выше — ошибка) |
+| `UM_LINK_FANOUT` | `20` | `mem_recall(hops>1)`: максимум связей с узла на направление |
+| `UM_GRAPH_DECAY` | `0.5` | `mem_recall(hops>1)`: множитель score на глубину (`depth-1`) |
 | `UM_REDACT_ENABLED` | `true` | Гейт секретов на входе (дефолт ON — продукт публичный) |
 | `UM_REDACT_PATTERNS` | `api_key,bearer_token,password_assignment,private_key` | Подмножество каталога через запятую |
 | `UM_SUMMARIZER_URL` / `UM_SUMMARIZER_MODEL` | — | LLM-пересказ; без них extractive |

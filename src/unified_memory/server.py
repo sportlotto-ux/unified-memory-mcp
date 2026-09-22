@@ -152,13 +152,23 @@ def mem_link(src: str, dst: str, rel: str, weight: float = 1.0,
 @mcp.tool()
 def mem_recall(query: str, scope: str = "all", session_id: str = "",
                limit: int = 10, owner: str = "",
-               include_expired: bool = False, as_of: str = "") -> str:
+               include_expired: bool = False, as_of: str = "",
+               hops: int = 1, rel: str = "") -> str:
     """Unified search: FTS + vectors + RRF. Scope: all | session | facts.
     Истёкшие (valid_until) прячутся (include_expired=True — аудит истории).
-    as_of (ISO-date) — срез графа на дату: valid_from <= as_of < valid_until."""
+    as_of (ISO-date) — срез графа на дату: valid_from <= as_of < valid_until.
+    hops>1 — BFS по типизированным связям и entity-графу (ADR-001); rel фильтрует
+    связи (`supports`/`contradicts`/`supersedes`/`derives_from`; на рёбрах — predicate)."""
+    ing = _ingest()
+    cfg = _STATE["cfg"]
+    if hops < 1:
+        raise ValueError("hops must be >= 1")
+    if hops > cfg.recall_max_hops:
+        raise ValueError(
+            f"hops={hops} exceeds UM_RECALL_MAX_HOPS={cfg.recall_max_hops}")
     as_of_ts = parse_as_of(as_of) if as_of else None
-    hits = _ingest().router().recall(query, scope, session_id, limit, owner,
-                                     include_expired, as_of_ts)
+    hits = ing.router().recall(query, scope, session_id, limit, owner,
+                               include_expired, as_of_ts, hops, rel)
     out = []
     for h in hits:
         body = h.body[:2000]
