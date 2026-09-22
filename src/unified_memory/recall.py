@@ -51,7 +51,8 @@ class Router:
                limit: int = 10, owner: str = "",
                include_expired: bool = False,
                as_of: float | None = None,
-               hops: int = 1, rel: str = "") -> list[Hit]:
+               hops: int = 1, rel: str = "",
+               diagnostics: bool = False) -> list[Hit]:
         if scope not in VALID_SCOPES:
             raise ValueError(f"unknown scope {scope!r}: {VALID_SCOPES}")
         if limit <= 0:
@@ -60,11 +61,17 @@ class Router:
             return []  # #5: без session_id граф/поиск вернули бы чужие данные
         self.last_stats = {"dim_skipped": 0}
         lists: list[list[Hit]] = []
+        vec_hits: list[Hit] = []
+        timing: dict = {}
+        t0 = time.perf_counter() if diagnostics else 0.0
         fts_hits = self.store.fts_search(query, scope=scope, session_id=session_id,
                                          limit=limit * 2, owner=owner,
                                          include_expired=include_expired, as_of=as_of)
         if fts_hits:
             lists.append(fts_hits)
+        if diagnostics:
+            timing["fts_ms"] = round((time.perf_counter() - t0) * 1000, 3)
+            t0 = time.perf_counter()
         if self.backend is not None:
             qv = self.backend.embed_query(query)
             tables = {"all": None, "session": ["um_messages", "um_summaries", "um_edges"],
@@ -113,8 +120,12 @@ class Router:
                     continue
                 scored.append(Hit(ot, oid, body, cosine(qv, vec), sid))
             scored.sort(key=lambda h: -h.score)
-            if scored:
-                lists.append(scored[:limit * 2])
+            vec_hits = scored[:limit * 2]
+            if vec_hits:
+                lists.append(vec_hits)
+        if diagnostics:
+            timing["vectors_ms"] = round((time.perf_counter() - t0) * 1000, 3)
+            t0 = time.perf_counter()
         if hops > 1:
             # guardrail 1: старый _graph_arm не тронут; BFS — отдельная ветка.
             seeds = [(h.owner_table, h.owner_id) for lst in lists for h in lst]
@@ -126,6 +137,9 @@ class Router:
                                          include_expired, as_of)
         if graph_hits:
             lists.append(graph_hits)
+        if diagnostics:
+            timing["graph_ms"] = round((time.perf_counter() - t0) * 1000, 3)
+            t0 = time.perf_counter()
         if not lists:
             return []
         # v0.4-п.3: один пайп поверх fused — recency-приор, scope-bias, MMR.
@@ -146,7 +160,25 @@ class Router:
                                 h.session_id, h.extra, ts))
         adjusted.sort(key=lambda h: -h.score)
         self.last_stats["reranked"] = len(adjusted)
-        return self._mmr(adjusted, limit)
+        final = self._mmr(adjusted, limit)
+        if diagnostics:
+            keys = {(h.owner_table, h.owner_id) for h in final}
+            arms = {"fts": fts_hits, "vectors": vec_hits, "graph": graph_hits}
+            self.last_stats["diagnostics"] = {
+                "arms": {k: len(v) for k, v in arms.items()},       # до RRF
+                "contrib": {k: len({(h.owner_table, h.owner_id) for h in v} & keys)
+                            for k, v in arms.items()},              # вклад в финал
+                "fused": len(adjusted), "returned": len(final),
+                "timings_ms": dict(timing,
+                                   fuse_ms=round((time.perf_counter() - t0) * 1000, 3)),
+                "hops": hops,
+                "bfs": self.last_stats.get("bfs"),
+                "degraded": {"vectors_enabled": self.backend is not None,
+                             "fts": self.store.fts,
+                             "vec_index": self.last_stats.get("vec_index", "-"),
+                             "dim_skipped": self.last_stats.get("dim_skipped", 0)},
+            }
+        return final
 
     def _mmr(self, hits: list[Hit], limit: int) -> list[Hit]:
         """MMR по Жаккару токенов тел: дубли parent/children не забивают топ.
@@ -224,6 +256,7 @@ class Router:
         seed_keys = {(t, i) for t, i in seeds}
         visited: set[tuple[str, int]] = set()
         node_cap = max(limit * fanout, 100)  # страховка от dense-взрыва
+        self._bfs_links_count = 0
         queue: list[tuple[str, int, int]] = []
         emitted: dict[tuple[str, int], tuple[float, str, str]] = {}
 
@@ -273,6 +306,9 @@ class Router:
             if len(emitted) >= limit:
                 break
 
+        self.last_stats["bfs"] = {"nodes": len(visited),
+                                  "links": self._bfs_links_count,
+                                  "emitted": len(emitted), "max_hops": max_hops}
         hits = [Hit(k[0], k[1], v[1], v[0], v[2]) for k, v in emitted.items()]
         hits.sort(key=lambda h: -h.score)
         return hits[:limit]
@@ -283,9 +319,11 @@ class Router:
                    seed_keys: set, emitted: dict, enqueue, limit: int) -> None:
         """Расширение узла по um_links: liveness линка (в link_neighbors) +
         liveness узла-назначения (node_ok) — guardrail 4."""
-        for nb in self.store.link_neighbors(
-                table, oid, owner=owner, include_expired=include_expired,
-                as_of=as_of, rel=filt, session_id=sess, limit=fanout):
+        nbs = self.store.link_neighbors(
+            table, oid, owner=owner, include_expired=include_expired,
+            as_of=as_of, rel=filt, session_id=sess, limit=fanout)
+        self._bfs_links_count += len(nbs)
+        for nb in nbs:
             nt, nid = nb["table"], nb["id"]
             key = (nt, nid)
             if key not in emitted and key not in seed_keys \

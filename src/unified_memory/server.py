@@ -153,12 +153,15 @@ def mem_link(src: str, dst: str, rel: str, weight: float = 1.0,
 def mem_recall(query: str, scope: str = "all", session_id: str = "",
                limit: int = 10, owner: str = "",
                include_expired: bool = False, as_of: str = "",
-               hops: int = 1, rel: str = "") -> str:
+               hops: int = 1, rel: str = "",
+               diagnostics: bool = False) -> str:
     """Unified search: FTS + vectors + RRF. Scope: all | session | facts.
     Истёкшие (valid_until) прячутся (include_expired=True — аудит истории).
     as_of (ISO-date) — срез графа на дату: valid_from <= as_of < valid_until.
     hops>1 — BFS по типизированным связям и entity-графу (ADR-001); rel фильтрует
-    связи (`supports`/`contradicts`/`supersedes`/`derives_from`; на рёбрах — predicate)."""
+    связи (`supports`/`contradicts`/`supersedes`/`derives_from`; на рёбрах — predicate).
+    diagnostics=true → {"hits": [...], "diagnostics": {arms/contrib/timings/bfs/degraded}};
+    false — ровно прежний список (аддитивность)."""
     ing = _ingest()
     cfg = _STATE["cfg"]
     if hops < 1:
@@ -167,8 +170,10 @@ def mem_recall(query: str, scope: str = "all", session_id: str = "",
         raise ValueError(
             f"hops={hops} exceeds UM_RECALL_MAX_HOPS={cfg.recall_max_hops}")
     as_of_ts = parse_as_of(as_of) if as_of else None
-    hits = ing.router().recall(query, scope, session_id, limit, owner,
-                               include_expired, as_of_ts, hops, rel)
+    router = ing.router()
+    hits = router.recall(query, scope, session_id, limit, owner,
+                         include_expired, as_of_ts, hops, rel,
+                         diagnostics=diagnostics)
     out = []
     for h in hits:
         body = h.body[:2000]
@@ -177,6 +182,10 @@ def mem_recall(query: str, scope: str = "all", session_id: str = "",
         out.append({"kind": h.owner_table, "id": h.owner_id,
                     "score": round(h.score, 4), "session": h.session_id,
                     "body": body})
+    if diagnostics:
+        return json.dumps({"hits": out,
+                           "diagnostics": router.last_stats.get("diagnostics", {})},
+                          ensure_ascii=False)
     return json.dumps(out, ensure_ascii=False)
 
 
@@ -412,14 +421,18 @@ def mem_status() -> str:
 @mcp.tool()
 def mem_doctor(mode: str = "check", apply: bool = False) -> str:
     """DB diagnostics. mode: check (readonly: diagnostics + hygiene candidates) |
+    export (readonly JSON dump to <db>.export-<ts>.json) |
     clean (purge orphans) | repair (purge + FTS rebuild + vec rebuild).
     clean/repair требуют apply=True (иначе dry-run) и всегда backup-first."""
     store = _store()
     if mode == "check":
         return json.dumps({**store.diagnostics(), "hygiene": store.hygiene()})
+    if mode == "export":
+        from unified_memory.export import export_store
+        return json.dumps(export_store(store), ensure_ascii=False)
     if mode not in ("clean", "repair", "archive", "purge"):
         raise ValueError(
-            f"unknown mode {mode!r}: check | clean | repair | archive | purge")
+            f"unknown mode {mode!r}: check | export | clean | repair | archive | purge")
     cfg = _STATE["cfg"]
     if mode == "archive":
         if not apply:

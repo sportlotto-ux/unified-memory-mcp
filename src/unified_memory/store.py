@@ -334,6 +334,9 @@ class Store:
                      ("schema_version", "1")],
                 )
                 self.conn.commit()
+        self.conn.execute(
+            "INSERT OR IGNORE INTO um_meta(key, value) VALUES('schema_version','1')")
+        self.conn.commit()
 
     # -- meta -------------------------------------------------------------
     @_locked
