@@ -162,6 +162,7 @@ class Hit:
     score: float
     session_id: str = ""
     extra: str = ""
+    created_at: float = 0.0  # v0.4-п.3: штампует Router для recency-приора
 
 
 class Store:
@@ -501,6 +502,22 @@ class Store:
                         WHERE e.id IN ({ph})""", oids).fetchall()
                 for oid, sname, pred, oname, sid in rows:
                     out[(ot, oid)] = (f"{sname} --{pred}--> {oname}", sid)
+        return out
+
+    @_locked
+    def created_for(self, refs: list[tuple[str, int]]) -> dict[tuple[str, int], float]:
+        """Batch timestamps для recency-приора: 1 запрос на таблицу, не N+1."""
+        out: dict[tuple[str, int], float] = {}
+        by_table: dict[str, list[int]] = {}
+        for ot, oid in refs:
+            by_table.setdefault(ot, []).append(oid)
+        for ot, oids in by_table.items():
+            if ot not in ("um_messages", "um_summaries", "um_facts", "um_edges"):
+                continue
+            ph = ",".join("?" * len(oids))
+            for oid, ts in self.conn.execute(
+                    f"SELECT id, created_at FROM {ot} WHERE id IN ({ph})", oids):
+                out[(ot, oid)] = float(ts or 0.0)
         return out
 
     @_locked

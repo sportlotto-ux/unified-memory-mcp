@@ -99,7 +99,7 @@ class Ingest:
                 "covered": len(head), "kept_tail": len(tail)}
 
     def router(self) -> Router:
-        return Router(self.store, self.backend)
+        return Router(self.store, self.backend, self.cfg)
 
     def reindex(self, batch: int = 64) -> dict:
         """Лестница после смены модели: довложить вектора, которых нет.

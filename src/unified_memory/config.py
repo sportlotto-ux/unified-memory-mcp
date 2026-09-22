@@ -91,6 +91,18 @@ def _default_redact() -> bool:
     return _strict_bool("UM_REDACT_ENABLED", True)
 
 
+def _default_halflife() -> float:
+    return _strict_float("UM_RECENCY_HALFLIFE_DAYS", 30.0)
+
+
+def _default_scope_bias() -> float:
+    return _strict_float("UM_SCOPE_BIAS", 0.15)
+
+
+def _default_mmr() -> float:
+    return _strict_float("UM_MMR_LAMBDA", 0.7)
+
+
 def _default_redact_patterns() -> tuple[str, ...]:
     from .redact import ALL, PATTERNS
 
@@ -122,6 +134,10 @@ class Config:
     # Redaction-гейт (v0.4-п.1): default ON, каталог как у LCM.
     redact_enabled: bool = field(default_factory=_default_redact)
     redact_patterns: tuple[str, ...] = field(default_factory=_default_redact_patterns)
+    # Ререйтинг recall (v0.4-п.3): recency-приор, scope-bias, MMR-диверсификация.
+    recency_halflife_days: float = field(default_factory=_default_halflife)
+    scope_bias: float = field(default_factory=_default_scope_bias)
+    mmr_lambda: float = field(default_factory=_default_mmr)
 
     def __post_init__(self) -> None:
         if self.embedding_backend not in ("local", "openai"):
@@ -134,6 +150,12 @@ class Config:
             raise ValueError("UM_EMBEDDING_TIMEOUT must be > 0")
         if self.redact_enabled and not self.redact_patterns:
             raise ValueError("UM_REDACT_PATTERNS must be non-empty when redaction is enabled")
+        if self.recency_halflife_days < 0:
+            raise ValueError("UM_RECENCY_HALFLIFE_DAYS must be >= 0 (0 = recency off)")
+        if self.scope_bias < 0:
+            raise ValueError("UM_SCOPE_BIAS must be >= 0 (0 = no session boost)")
+        if not 0.0 <= self.mmr_lambda <= 1.0:
+            raise ValueError("UM_MMR_LAMBDA must be in [0, 1] (1 = pure relevance)")
         if self.context_tokens <= 0:
             raise ValueError("UM_CONTEXT_TOKENS must be > 0")
         if not 0.0 < self.compact_threshold <= 1.0:

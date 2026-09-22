@@ -6,6 +6,10 @@
 
 from __future__ import annotations
 
+import math
+import time
+
+from .config import Config
 from .embeddings import EmbeddingBackend
 from .store import Hit, Store, cosine, tokenize
 
@@ -32,9 +36,11 @@ VALID_SCOPES = ("all", "session", "facts")
 
 
 class Router:
-    def __init__(self, store: Store, backend: EmbeddingBackend | None = None) -> None:
+    def __init__(self, store: Store, backend: EmbeddingBackend | None = None,
+                 cfg: Config | None = None) -> None:
         self.store = store
         self.backend = backend
+        self.cfg = cfg or Config()
         self.last_stats: dict = {}
 
     @property
@@ -83,9 +89,55 @@ class Router:
             lists.append(graph_hits)
         if not lists:
             return []
-        if len(lists) == 1:
-            return lists[0][:limit]
-        return rrf_fuse(lists)[:limit]
+        # v0.4-п.3: один пайп поверх fused — recency-приор, scope-bias, MMR.
+        # Timestamps одним batch (макс. 4 запроса), а не правками трёх arm'ов.
+        fused = lists[0] if len(lists) == 1 else rrf_fuse(lists)
+        stamps = self.store.created_for([(h.owner_table, h.owner_id) for h in fused])
+        now = time.time()
+        adjusted = []
+        for h in fused:
+            score = h.score
+            ts = stamps.get((h.owner_table, h.owner_id), 0.0)
+            if self.cfg.recency_halflife_days > 0 and ts > 0:
+                age_days = max(0.0, (now - ts) / 86400.0)
+                score *= 0.5 + 0.5 * math.exp(-age_days / self.cfg.recency_halflife_days)
+            if scope == "all" and session_id and h.session_id == session_id:
+                score *= 1.0 + self.cfg.scope_bias
+            adjusted.append(Hit(h.owner_table, h.owner_id, h.body, score,
+                                h.session_id, h.extra, ts))
+        adjusted.sort(key=lambda h: -h.score)
+        self.last_stats["reranked"] = len(adjusted)
+        return self._mmr(adjusted, limit)
+
+    def _mmr(self, hits: list[Hit], limit: int) -> list[Hit]:
+        """MMR по Жаккару токенов тел: дубли parent/children не забивают топ.
+
+        λ=1 — чистый relevance-порядок без перебора пар. Оценки нормируем
+        на max (arm'ы живут в разных шкалах: FTS=1.0, cosine∈[-1,1], RRF≈0.01).
+        """
+        if self.cfg.mmr_lambda >= 1.0 or len(hits) <= 1:
+            return hits[:limit]
+        cands = hits[:limit * 2]
+        peak = max((h.score for h in cands), default=0.0) or 1.0
+        sets = [set(tokenize(h.body)) for h in cands]
+        picked = [0]
+        chosen = {0}
+        lam = self.cfg.mmr_lambda
+        while len(picked) < min(limit, len(cands)):
+            best, best_val = -1, float("-inf")
+            for i in range(1, len(cands)):
+                if i in chosen:
+                    continue
+                sim = max((len(sets[i] & sets[j]) / max(1, len(sets[i] | sets[j]))
+                           for j in picked), default=0.0)
+                val = lam * (cands[i].score / peak) - (1.0 - lam) * sim
+                if val > best_val:
+                    best, best_val = i, val
+            if best < 0:
+                break
+            picked.append(best)
+            chosen.add(best)
+        return [cands[i] for i in picked]
 
     def _graph_arm(self, query: str, scope: str, session_id: str,
                    limit: int) -> list[Hit]:

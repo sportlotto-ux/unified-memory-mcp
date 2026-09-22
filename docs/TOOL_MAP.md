@@ -14,7 +14,7 @@
 
 | Новый тул | Поглощает | Решение |
 |---|---|---|
-| `mem_recall` | `lcm_recall` + `lcm_grep` + `mnemosyne_recall` + `lcm_recent` | Один recall: FTS + vectors + RRF; `scope:` выбирает current/all/recent. Убивает главный дубль |
+| `mem_recall` | `lcm_recall` + `lcm_grep` + `mnemosyne_recall` + `lcm_recent` | Один recall: FTS + vectors + RRF + recency-приор + scope-bias + MMR; `scope:` выбирает current/all/recent. Убивает главный дубль |
 | `mem_evidence` | `lcm_query_state` + `lcm_compute` + `lcm_compile_evidence` + `lcm_evidence_pack` + `lcm_retrieve` | Evidence-семья LCM (5 тулов) — сжать до 1–2 с режимами |
 | `mem_fact` | `remember_canonical` + `recall_canonical` + `triple_add/query` + `graph_*` | Факты/граф одной группой вместо 6 тулов (триплет — параметрами `subject/predicate/object`) |
 | `mem_assemble` | (новое, наследник LCM assembly) | Bounded активный контекст: summaries + fresh tail |
