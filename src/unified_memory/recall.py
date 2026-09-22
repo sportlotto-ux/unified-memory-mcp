@@ -55,7 +55,7 @@ class Router:
                 body, sid = self.store._body_of(ot, oid)
                 if body is None:
                     continue
-                if scope == "session" and ot in ("um_messages", "um_edges") \
+                if scope == "session" and ot in ("um_messages", "um_edges", "um_summaries") \
                         and sid != session_id:
                     continue
                 scored.append(Hit(ot, oid, body, cosine(qv, vec), sid))

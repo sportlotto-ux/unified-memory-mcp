@@ -51,6 +51,8 @@ class Ingest:
                     self.backend.spec.name)
                 for ent in (subject, obj):
                     ent_id = self.store.add_entity(ent)
+                    if self.store.has_vector("um_entities", ent_id):
+                        continue  # имя то же — вектор тот же, CPU не жжём
                     self.store.add_vector(
                         "um_entities", ent_id,
                         self.backend.embed_docs([ent])[0],

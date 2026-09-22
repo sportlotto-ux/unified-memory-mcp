@@ -99,9 +99,15 @@ def mem_assemble(session_id: str, budget: int = 0) -> str:
 
 
 @mcp.tool()
-def mem_forget(id: int) -> str:
-    """Delete a fact by id."""
-    return json.dumps({"deleted": _STORE.delete_fact(int(id))})
+def mem_forget(id: str = "", kind: str = "fact") -> str:
+    """Delete by kind: fact (numeric id), edge (numeric id), entity (name)."""
+    if kind == "fact":
+        return json.dumps({"deleted": _STORE.delete_fact(int(id))})
+    if kind == "edge":
+        return json.dumps({"deleted": _STORE.delete_edge(int(id))})
+    if kind == "entity":
+        return json.dumps({"deleted": _STORE.delete_entity(id)})
+    raise ValueError(f"unknown kind {kind!r}: fact | edge | entity")
 
 
 @mcp.tool()

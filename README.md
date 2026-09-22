@@ -50,7 +50,7 @@ export UM_SUMMARIZER_MODEL=qwen3:8b
 | `mem_expand` | Дословно по `kind`+`id` (`message`/`fact`/`summary`/`edge`) |
 | `mem_compact` | Ручное сжатие старых сообщений (сырьё остаётся) |
 | `mem_assemble` | Bounded активный контекст: summaries + свежий хвост в бюджет токенов |
-| `mem_forget` | Удалить факт по id |
+| `mem_forget` | Удаление по `kind`: `fact`/`edge` (id) или `entity` (имя), каскадом |
 | `mem_status` | Счётчики + флаги деградации (`vectors_enabled`, `summarizer`, `fts`) |
 | `mem_doctor` | `integrity_check`, вектора по моделям |
 

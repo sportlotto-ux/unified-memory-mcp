@@ -83,6 +83,9 @@ CREATE TABLE IF NOT EXISTS um_edges (
 );
 CREATE INDEX IF NOT EXISTS idx_um_edges_subj ON um_edges(subject_id);
 CREATE INDEX IF NOT EXISTS idx_um_edges_obj ON um_edges(object_id);
+CREATE INDEX IF NOT EXISTS idx_um_edges_fact ON um_edges(fact_id);
+CREATE INDEX IF NOT EXISTS idx_um_edges_session ON um_edges(session_id);
+CREATE INDEX IF NOT EXISTS idx_um_vectors_model ON um_vectors(model);
 """
 
 _FTS_SCHEMA = """
@@ -169,7 +172,6 @@ class Store:
                 self.conn.commit()
 
     # -- meta -------------------------------------------------------------
-    @_locked
     @_locked
     def meta_get(self, key: str) -> str | None:
         row = self.conn.execute("SELECT value FROM um_meta WHERE key=?", (key,)).fetchone()
@@ -292,7 +294,7 @@ class Store:
                 body, sid = self._body_of(ot, oid)
                 if body is None:
                     continue
-                if scope == "session" and ot in ("um_messages", "um_edges") \
+                if scope == "session" and ot in ("um_messages", "um_edges", "um_summaries") \
                         and sid != session_id:
                     continue
                 hits.append(Hit(ot, oid, body, 1.0, sid))
@@ -347,8 +349,8 @@ class Store:
             return (r[0], r[1]) if r else (None, "")
         if owner_table == "um_summaries":
             r = self.conn.execute(
-                "SELECT body FROM um_summaries WHERE id=?", (owner_id,)).fetchone()
-            return ((r[0], "") if r else (None, ""))
+                "SELECT body, session_id FROM um_summaries WHERE id=?", (owner_id,)).fetchone()
+            return ((r[0], r[1]) if r else (None, ""))
         if owner_table == "um_edges":
             r = self.conn.execute(
                 """SELECT s.name, e.predicate, o.name, e.session_id FROM um_edges e
@@ -397,6 +399,61 @@ class Store:
                (SELECT id FROM um_entities)""")
         self.conn.commit()
         return cur.rowcount > 0
+
+    @_locked
+    def has_vector(self, owner_table: str, owner_id: int) -> bool:
+        return self.conn.execute(
+            "SELECT 1 FROM um_vectors WHERE owner_table=? AND owner_id=?",
+            (owner_table, owner_id)).fetchone() is not None
+
+    def _drop_edge_rows(self, eid: int) -> None:
+        """Без лока — вызывать из locked-контекста."""
+        self.conn.execute("DELETE FROM um_edges WHERE id=?", (eid,))
+        self.conn.execute(
+            "DELETE FROM um_vectors WHERE owner_table='um_edges' AND owner_id=?", (eid,))
+        if self.fts:
+            self.conn.execute(
+                "DELETE FROM um_fts WHERE owner_table='um_edges' AND owner_id=?", (eid,))
+
+    def _prune_orphan_entities(self) -> None:
+        self.conn.execute(
+            """DELETE FROM um_entities WHERE id NOT IN
+               (SELECT subject_id FROM um_edges UNION SELECT object_id FROM um_edges)""")
+        self.conn.execute(
+            """DELETE FROM um_vectors WHERE owner_table='um_entities' AND owner_id NOT IN
+               (SELECT id FROM um_entities)""")
+
+    @_locked
+    def delete_edge(self, eid: int) -> bool:
+        """Прямое удаление ребра — закрывает дыру бессмертных fact_id=0 (#3)."""
+        cur = self.conn.execute("SELECT 1 FROM um_edges WHERE id=?", (eid,)).fetchone()
+        if not cur:
+            return False
+        self._drop_edge_rows(eid)
+        self._prune_orphan_entities()
+        self.conn.commit()
+        return True
+
+    @_locked
+    def delete_entity(self, name: str) -> bool:
+        """Удалить сущность + все её рёбра каскадом."""
+        key = name.strip().lower()
+        row = self.conn.execute(
+            "SELECT id FROM um_entities WHERE name=?", (key,)).fetchone()
+        if not row:
+            return False
+        ent_id = row[0]
+        for (eid,) in self.conn.execute(
+                "SELECT id FROM um_edges WHERE subject_id=? OR object_id=?",
+                (ent_id, ent_id)):
+            self._drop_edge_rows(eid)
+        self.conn.execute("DELETE FROM um_entities WHERE id=?", (ent_id,))
+        self.conn.execute(
+            "DELETE FROM um_vectors WHERE owner_table='um_entities' AND owner_id=?",
+            (ent_id,))
+        self._prune_orphan_entities()
+        self.conn.commit()
+        return True
 
     # -- graph ----------------------------------------------------------
     @_locked
