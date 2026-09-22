@@ -2,6 +2,8 @@
 fastembed-dependent cases skip when fastembed is absent.
 """
 
+import os
+
 import pytest
 
 from unified_memory.embeddings import (
@@ -38,8 +40,12 @@ def test_fresh_store_passes():
 fastembed = pytest.importorskip("fastembed", reason="pip install -e .[local-embed]")
 
 
+@pytest.mark.skipif(not os.environ.get("UM_LIVE_EMBED_TEST"),
+                    reason="downloads a model; set UM_LIVE_EMBED_TEST=1 to run")
 def test_embed_query_dim(tmp_path):
-    b = FastembedBackend(cache_dir=tmp_path)
+    from unified_memory.embeddings import DEFAULT_MODEL
+    b = FastembedBackend(model=os.environ.get("UM_LIVE_MODEL", DEFAULT_MODEL),
+                         cache_dir=tmp_path)
     b.warm()
     vec = b.embed_query("проверка связи")
     assert len(vec) == b.dim

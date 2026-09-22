@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from .embeddings import EmbeddingBackend
-from .store import Hit, Store, cosine
+from .store import Hit, Store, cosine, tokenize
 
 _RRF_K = 60
 
@@ -63,6 +63,30 @@ class Router:
                 lists.append(scored[:limit * 2])
         if not lists:
             return []
+        graph_hits = self._graph_arm(query, scope, limit * 2)
+        if graph_hits:
+            lists.append(graph_hits)
         if len(lists) == 1:
             return lists[0][:limit]
         return rrf_fuse(lists)[:limit]
+
+    def _graph_arm(self, query: str, scope: str, limit: int) -> list[Hit]:
+        """1-hop expansion: совпавшие сущности -> их рёбра."""
+        if scope == "facts":
+            return []
+        terms = tokenize(query)
+        if not terms:
+            return []
+        hits: list[Hit] = []
+        seen: set[int] = set()
+        for ent in self.store.match_entities(terms, limit=5):
+            for nb in self.store.neighbors(ent):
+                eid = nb["edge_id"]
+                if eid in seen:
+                    continue
+                seen.add(eid)
+                body = f"{nb['subject']} --{nb['predicate']}--> {nb['object']}"
+                hits.append(Hit("um_edges", eid, body, 1.0, nb["session_id"]))
+                if len(hits) >= limit:
+                    return hits
+        return hits

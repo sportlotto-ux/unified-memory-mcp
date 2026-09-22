@@ -29,12 +29,27 @@ class Ingest:
         return mid
 
     def remember_fact(self, category: str, name: str, body: str,
-                      importance: float = 0.5) -> int:
+                      importance: float = 0.5, subject: str = "",
+                      predicate: str = "", obj: str = "",
+                      session_id: str = "") -> int:
         fid = self.store.add_fact(category, name, body, importance)
         if self.backend is not None:
             self.store.add_vector("um_facts", fid,
                                   self.backend.embed_docs([f"{name} {body}"])[0],
                                   self.backend.spec.name)
+        if subject and predicate and obj:
+            eid = self.store.add_edge(subject, predicate, obj, session_id)
+            if self.backend is not None:
+                self.store.add_vector(
+                    "um_edges", eid,
+                    self.backend.embed_docs([f"{subject} {predicate} {obj}"])[0],
+                    self.backend.spec.name)
+                for ent in (subject, obj):
+                    ent_id = self.store.add_entity(ent)
+                    self.store.add_vector(
+                        "um_entities", ent_id,
+                        self.backend.embed_docs([ent])[0],
+                        self.backend.spec.name)
         return fid
 
     def compact_session(self, session_id: str, keep_tail: int = 20,

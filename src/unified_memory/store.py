@@ -64,6 +64,24 @@ CREATE TABLE IF NOT EXISTS um_vectors (
 CREATE INDEX IF NOT EXISTS idx_um_vectors_owner ON um_vectors(owner_table, owner_id);
 
 CREATE TABLE IF NOT EXISTS um_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+
+-- Граф памяти (источник: mnemosyne triples/episodic_graph).
+-- Сущности канонизируются по lower().strip(); вектора — в um_vectors.
+CREATE TABLE IF NOT EXISTS um_entities (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS um_edges (
+    id INTEGER PRIMARY KEY,
+    subject_id INTEGER NOT NULL REFERENCES um_entities(id),
+    predicate TEXT NOT NULL,
+    object_id INTEGER NOT NULL REFERENCES um_entities(id),
+    session_id TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_um_edges_subj ON um_edges(subject_id);
+CREATE INDEX IF NOT EXISTS idx_um_edges_obj ON um_edges(object_id);
 """
 
 _FTS_SCHEMA = """
@@ -291,6 +309,13 @@ class Store:
             r = self.conn.execute(
                 "SELECT body FROM um_summaries WHERE id=?", (owner_id,)).fetchone()
             return ((r[0], "") if r else (None, ""))
+        if owner_table == "um_edges":
+            r = self.conn.execute(
+                """SELECT s.name, e.predicate, o.name FROM um_edges e
+                   JOIN um_entities s ON s.id = e.subject_id
+                   JOIN um_entities o ON o.id = e.object_id
+                   WHERE e.id=?""", (owner_id,)).fetchone()
+            return ((f"{r[0]} --{r[1]}--> {r[2]}", "") if r else (None, ""))
         if owner_table == "um_facts":
             r = self.conn.execute(
                 "SELECT name, body FROM um_facts WHERE id=?", (owner_id,)).fetchone()
@@ -317,9 +342,68 @@ class Store:
         return cur.rowcount > 0
 
     @_locked
+
+    # -- graph ----------------------------------------------------------
+    @_locked
+    def add_entity(self, name: str) -> int:
+        import time as _t
+        key = name.strip().lower()
+        row = self.conn.execute(
+            "SELECT id FROM um_entities WHERE name=?", (key,)).fetchone()
+        if row:
+            return row[0]
+        cur = self.conn.execute(
+            "INSERT INTO um_entities(name, created_at) VALUES(?,?)", (key, _t.time()))
+        self.conn.commit()
+        return cur.lastrowid
+
+    @_locked
+    def add_edge(self, subject: str, predicate: str, obj: str,
+                 session_id: str = "") -> int:
+        import time as _t
+        sid = self.add_entity(subject)
+        oid = self.add_entity(obj)
+        cur = self.conn.execute(
+            "INSERT INTO um_edges(subject_id, predicate, object_id, session_id, created_at)"
+            " VALUES(?,?,?,?,?)",
+            (sid, predicate.strip().lower(), oid, session_id, _t.time()))
+        eid = cur.lastrowid
+        self._fts_index("um_edges", eid, f"{subject} {predicate} {obj}")
+        self.conn.commit()
+        return eid
+
+    @_locked
+    def neighbors(self, entity_name: str) -> list[dict]:
+        key = entity_name.strip().lower()
+        row = self.conn.execute(
+            "SELECT id FROM um_entities WHERE name=?", (key,)).fetchone()
+        if not row:
+            return []
+        eid = row[0]
+        rows = self.conn.execute(
+            """SELECT e.id, s.name, e.predicate, o.name, e.session_id
+               FROM um_edges e
+               JOIN um_entities s ON s.id = e.subject_id
+               JOIN um_entities o ON o.id = e.object_id
+               WHERE e.subject_id = ? OR e.object_id = ?""", (eid, eid)).fetchall()
+        return [dict(zip(["edge_id", "subject", "predicate", "object", "session_id"], r))
+                for r in rows]
+
+    @_locked
+    def match_entities(self, terms: list[str], limit: int = 10) -> list[str]:
+        out = []
+        for t in terms[:8]:
+            for r in self.conn.execute(
+                    "SELECT name FROM um_entities WHERE name LIKE ? LIMIT ?",
+                    (f"%{t}%", limit)):
+                if r[0] not in out:
+                    out.append(r[0])
+        return out[:limit]
+
     def stats(self) -> dict:
         out = {}
-        for t in ["um_messages", "um_summaries", "um_facts", "um_vectors"]:
+        for t in ["um_messages", "um_summaries", "um_facts", "um_vectors",
+           "um_entities", "um_edges"]:
             out[t] = self.conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
         out["fts"] = self.fts
         out["embedding_model"] = self.meta_get("embedding_model")

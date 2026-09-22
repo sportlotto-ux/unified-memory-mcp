@@ -51,9 +51,12 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
     ),
 }
 
+# Дефолт репо — ПОЛНАЯ mpnet-base-v2 (768, не дистиллят).
+# Дистиллированная MiniLM-L12 (384) остаётся для лёгких стендов
+# (например, Hermes-инсталляция автора) через UM_EMBEDDING_MODEL.
 DEFAULT_MODEL = os.environ.get(
     "UM_EMBEDDING_MODEL",
-    "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+    "sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
 )
 
 

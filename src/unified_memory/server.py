@@ -56,9 +56,12 @@ def mem_remember(session_id: str = "default", role: str = "user",
 
 @mcp.tool()
 def mem_fact(category: str, name: str, body: str,
-             importance: float = 0.5) -> str:
-    """Save a long-term fact. Returns its id."""
-    return json.dumps({"id": _INGEST.remember_fact(category, name, body, importance)})
+             importance: float = 0.5, subject: str = "",
+             predicate: str = "", object: str = "",
+             session_id: str = "") -> str:
+    """Save a long-term fact, optionally with a graph triple. Returns its id."""
+    return json.dumps({"id": _INGEST.remember_fact(
+        category, name, body, importance, subject, predicate, object, session_id)})
 
 
 @mcp.tool()
@@ -73,10 +76,11 @@ def mem_recall(query: str, scope: str = "all", session_id: str = "",
 
 @mcp.tool()
 def mem_expand(kind: str, id: int) -> str:
-    """Verbatim fetch. kind: message | fact | summary."""
+    """Verbatim fetch. kind: message | fact | summary | edge."""
     if kind == "message":
         return json.dumps(_STORE.get_message(int(id)), ensure_ascii=False)
-    table = {"fact": "um_facts", "summary": "um_summaries"}[kind]
+    table = {"fact": "um_facts", "summary": "um_summaries",
+             "edge": "um_edges"}[kind]
     body, _ = _STORE._body_of(table, int(id))
     return json.dumps({"kind": kind, "id": int(id), "body": body}, ensure_ascii=False)
 
