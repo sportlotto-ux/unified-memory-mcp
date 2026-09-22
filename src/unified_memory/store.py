@@ -611,12 +611,12 @@ class Store:
     @_locked
     def get_message(self, mid: int, owner: str = "") -> dict | None:
         row = self.conn.execute(
-            "SELECT id, session_id, owner, role, content, created_at, source"
-            " FROM um_messages WHERE id=?", (mid,)).fetchone()
+            "SELECT id, session_id, owner, role, content, created_at, source,"
+            " externalized_ref FROM um_messages WHERE id=?", (mid,)).fetchone()
         if not row:
             return None
         d = dict(zip(["id", "session_id", "owner", "role", "content",
-                      "created_at", "source"], row))
+                      "created_at", "source", "externalized_ref"], row))
         if owner and d["owner"] != owner:
             return None  # чужой тенант: как будто нет
         return d
@@ -927,6 +927,56 @@ class Store:
                         "body": body, "created_at": ts})
         out.sort(key=lambda r: (-r["created_at"], -r["id"]))
         return out[:limit]
+
+    @_locked
+    def db_size_bytes(self) -> int:
+        pc = self.conn.execute("PRAGMA page_count").fetchone()[0]
+        ps = self.conn.execute("PRAGMA page_size").fetchone()[0]
+        return int(pc) * int(ps)
+
+    @_locked
+    def oldest_messages(self, limit: int = 500,
+                        before_ts: float = 0.0) -> list[dict]:
+        """Старейшие НЕархивированные сообщения (для выноса в холодный архив)."""
+        q = ("SELECT id, session_id, owner, role, content, created_at, source"
+             " FROM um_messages"
+             " WHERE (externalized_ref IS NULL OR externalized_ref='')")
+        params: list = []
+        if before_ts:
+            q += " AND created_at < ?"
+            params.append(before_ts)
+        q += " ORDER BY created_at ASC, id ASC LIMIT ?"
+        params.append(limit)
+        keys = ["id", "session_id", "owner", "role", "content", "created_at", "source"]
+        return [dict(zip(keys, r)) for r in self.conn.execute(q, params)]
+
+    @_locked
+    def message_vector(self, mid: int) -> tuple[bytes, str] | None:
+        """Сырой blob вектора + модель (копируется в архив без распаковки)."""
+        r = self.conn.execute(
+            "SELECT embedding, model FROM um_vectors"
+            " WHERE owner_table='um_messages' AND owner_id=?", (mid,)).fetchone()
+        return (r[0], r[1]) if r else None
+
+    @_locked
+    def external_ref(self, mid: int) -> str | None:
+        r = self.conn.execute(
+            "SELECT externalized_ref FROM um_messages WHERE id=?", (mid,)).fetchone()
+        return (r[0] or None) if r else None
+
+    @_locked
+    def mark_archived(self, mid: int, ref: str) -> None:
+        """Текст -> заглушка + externalized_ref; вектор и FTS из горячей удаляются (a2)."""
+        self.conn.execute(
+            "UPDATE um_messages SET content=?, externalized_ref=? WHERE id=?",
+            ("[archived]", ref, mid))
+        self._vec_delete("um_messages", mid)
+        self.conn.execute(
+            "DELETE FROM um_vectors WHERE owner_table='um_messages' AND owner_id=?", (mid,))
+        if self.fts:
+            self.conn.execute(
+                "DELETE FROM um_fts WHERE owner_table='um_messages' AND owner_id=?", (mid,))
+        self.conn.commit()
 
     @_locked
     def vectors_for(self, refs: list[tuple[str, int]]) -> dict[tuple[str, int], list[float]]:

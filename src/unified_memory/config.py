@@ -103,6 +103,25 @@ def _default_mmr() -> float:
     return _strict_float("UM_MMR_LAMBDA", 0.7)
 
 
+def _default_retention() -> int:
+    return _strict_int("UM_RETENTION_DAYS", 0)  # 0 = вечно (lossless-дефолт)
+
+
+def _default_archive_mb() -> int:
+    return _strict_int("UM_ARCHIVE_SIZE_MB", 1024)
+
+
+def _default_archive_path() -> Path:
+    raw = os.environ.get("UM_ARCHIVE_PATH")
+    if raw:
+        return Path(raw).expanduser()
+    return _home() / "unified_memory.archive.db"
+
+
+def _default_archive_batch() -> int:
+    return _strict_int("UM_ARCHIVE_BATCH", 500)
+
+
 def _default_vec_index() -> str:
     v = os.environ.get("UM_VEC_INDEX", "auto").strip().lower()
     if v not in ("auto", "off"):
@@ -147,6 +166,11 @@ class Config:
     mmr_lambda: float = field(default_factory=_default_mmr)
     # vec0-индекс (v0.4-п.6): auto = строить в reindex и использовать при совпадении dim.
     vec_index: str = field(default_factory=_default_vec_index)
+    # Retention/архив (v0.5-п.3): 0 = копим вечно (lossless-дефолт).
+    retention_days: int = field(default_factory=_default_retention)
+    archive_size_mb: int = field(default_factory=_default_archive_mb)
+    archive_path: Path = field(default_factory=_default_archive_path)
+    archive_batch: int = field(default_factory=_default_archive_batch)
 
     def __post_init__(self) -> None:
         if self.embedding_backend not in ("local", "openai"):
@@ -165,6 +189,14 @@ class Config:
             raise ValueError("UM_SCOPE_BIAS must be >= 0 (0 = no session boost)")
         if not 0.0 <= self.mmr_lambda <= 1.0:
             raise ValueError("UM_MMR_LAMBDA must be in [0, 1] (1 = pure relevance)")
+        if self.retention_days < 0:
+            raise ValueError("UM_RETENTION_DAYS must be >= 0 (0 = keep forever)")
+        if self.archive_size_mb <= 0:
+            raise ValueError("UM_ARCHIVE_SIZE_MB must be > 0")
+        if self.archive_batch <= 0:
+            raise ValueError("UM_ARCHIVE_BATCH must be > 0")
+        if self.archive_path == self.db_path:
+            raise ValueError("UM_ARCHIVE_PATH must differ from the main DB")
         if self.context_tokens <= 0:
             raise ValueError("UM_CONTEXT_TOKENS must be > 0")
         if not 0.0 < self.compact_threshold <= 1.0:

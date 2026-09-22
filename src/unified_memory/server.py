@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 
 try:
     import unified_memory  # noqa: F401 — установленный пакет или -m: путь не трогаем
@@ -27,6 +28,7 @@ from unified_memory.embeddings import make_backend  # noqa: E402
 from unified_memory.ingest import Ingest  # noqa: E402
 from unified_memory.store import Store  # noqa: E402
 from unified_memory.summarize import default_summarizer  # noqa: E402
+from unified_memory import archive  # noqa: E402
 from unified_memory.recent import parse_as_of, parse_period, parse_when  # noqa: E402
 
 mcp = _Server("unified-memory")
@@ -57,7 +59,38 @@ def _ingest():
                       embedding_model=cfg.embedding_model if backend else "")
         _STATE.update(store=store, cfg=cfg,
                       ingest=Ingest(store, backend, default_summarizer(), cfg))
+        _maybe_maintenance(store, cfg)  # ленивый weekly-purge + порог архива
     return _STATE["ingest"]
+
+
+def _maybe_maintenance(store, cfg) -> None:
+    """Никогда не роняет тул: любой сбой — в um_meta.maintenance_error."""
+    try:
+        now = time.time()
+        if cfg.retention_days > 0:
+            last = float(store.meta_get("retention_last_run") or 0)
+            if now - last >= 7 * 86400:
+                conn = archive.open_archive(cfg.archive_path)
+                try:
+                    archive.purge_older_than(
+                        conn, now - cfg.retention_days * 86400)
+                finally:
+                    conn.close()
+                store.meta_set("retention_last_run", str(now))
+        if store.db_size_bytes() >= cfg.archive_size_mb * 1024 * 1024:
+            conn = archive.open_archive(cfg.archive_path)
+            try:
+                moved = archive.move_oldest(store, conn, cfg.archive_batch,
+                                            label=str(cfg.archive_path))
+            finally:
+                conn.close()
+            store.meta_set("archive_last_run", str(now))
+            store.meta_set("archive_last_moved", str(moved))
+    except Exception as e:  # noqa: BLE001 — обслуживание не должно ломать тулы
+        try:
+            store.meta_set("maintenance_error", f"{type(e).__name__}: {e}"[:200])
+        except Exception:
+            pass
 
 
 def _store():
@@ -110,6 +143,18 @@ def mem_expand(kind: str, id: int, owner: str = "") -> str:
     """Verbatim fetch. kind: message | fact | summary | edge. Uniform schema."""
     if kind == "message":
         msg = _store().get_message(int(id), owner)
+        if msg and msg.get("externalized_ref"):
+            cfg = _STATE["cfg"]
+            conn = archive.open_archive(cfg.archive_path)
+            try:
+                arc = archive.fetch_message(conn, int(id))
+            finally:
+                conn.close()
+            body = arc["content"] if arc else None
+            return json.dumps({"kind": kind, "id": int(id), "body": body,
+                               "archived": True,
+                               "externalized_ref": msg["externalized_ref"]},
+                              ensure_ascii=False)
         return json.dumps({"kind": kind, "id": int(id),
                            "body": msg["content"] if msg else None},
                           ensure_ascii=False)
@@ -211,6 +256,11 @@ def mem_status() -> str:
     """Store stats and degradation flags."""
     ing = _ingest()
     cfg = _STATE["cfg"]
+    conn = archive.open_archive(cfg.archive_path)
+    try:
+        arch = archive.status(conn, cfg.archive_path)
+    finally:
+        conn.close()
     return json.dumps({**ing.store.stats(),
                        "vectors_enabled": ing.backend is not None,
                        "embedding_backend": cfg.embedding_backend,
@@ -220,7 +270,12 @@ def mem_status() -> str:
                        "redaction_patterns": list(cfg.redact_patterns),
                        "backend_error": _STATE["backend_error"],
                        "summarizer": type(default_summarizer()).__name__,
-                       "db": str(cfg.db_path)})
+                       "db": str(cfg.db_path),
+                       "db_size_bytes": ing.store.db_size_bytes(),
+                       "retention_days": cfg.retention_days,
+                       "retention_last_run": ing.store.meta_get("retention_last_run"),
+                       "maintenance_error": ing.store.meta_get("maintenance_error"),
+                       "archive": arch})
 
 
 @mcp.tool()
@@ -231,8 +286,39 @@ def mem_doctor(mode: str = "check", apply: bool = False) -> str:
     store = _store()
     if mode == "check":
         return json.dumps({**store.diagnostics(), "hygiene": store.hygiene()})
-    if mode not in ("clean", "repair"):
-        raise ValueError(f"unknown mode {mode!r}: check | clean | repair")
+    if mode not in ("clean", "repair", "archive", "purge"):
+        raise ValueError(
+            f"unknown mode {mode!r}: check | clean | repair | archive | purge")
+    cfg = _STATE["cfg"]
+    if mode == "archive":
+        if not apply:
+            return json.dumps({"mode": mode, "apply_required": True,
+                               "would_archive": len(store.oldest_messages(cfg.archive_batch)),
+                               "db_size_bytes": store.db_size_bytes()})
+        conn = archive.open_archive(cfg.archive_path)
+        try:
+            moved = archive.move_oldest(store, conn, cfg.archive_batch,
+                                        label=str(cfg.archive_path))
+            st = archive.status(conn, cfg.archive_path)
+        finally:
+            conn.close()
+        return json.dumps({"mode": mode, "moved": moved, **st})
+    if mode == "purge":
+        if cfg.retention_days <= 0:
+            return json.dumps({"mode": mode, "skipped": "retention_days=0 (keep forever)"})
+        cutoff = time.time() - cfg.retention_days * 86400
+        conn = archive.open_archive(cfg.archive_path)
+        try:
+            if not apply:
+                n = conn.execute(
+                    "SELECT count(*) FROM ar_messages WHERE created_at < ?",
+                    (cutoff,)).fetchone()[0]
+                return json.dumps({"mode": mode, "apply_required": True,
+                                   "would_purge": n})
+            purged = archive.purge_older_than(conn, cutoff)
+        finally:
+            conn.close()
+        return json.dumps({"mode": mode, "purged": purged})
     if not apply:
         return json.dumps({"mode": mode, "apply_required": True,
                            "would": store.hygiene()})
