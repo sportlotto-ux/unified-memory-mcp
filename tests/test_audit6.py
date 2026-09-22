@@ -190,3 +190,31 @@ def test_secret_scan_reports_without_values(srv):
     assert any(h["pattern"] == "api_key" and h["kind"] == "um_facts"
                and h["id"] == fid for h in out["hits"])
     assert secret not in raw  # отчёт не должен содержать значение
+
+
+# ---------- v0.7.3 A5: детект near-дублей фактов (read-only, owner-scoped) ----------
+
+def test_hygiene_detects_duplicate_facts_owner_scoped(tmp_path):
+    s = _store(tmp_path)
+    try:
+        a = s.add_fact("c", "a", "тело")
+        b = s.add_fact("c", "b", "тело2")
+        v = [1.0, 0.0, 0.0, 0.0]
+        s.add_vector("um_facts", a, list(v), "m")
+        s.add_vector("um_facts", b, list(v), "m")
+        c = s.add_fact("c", "c", "иное", owner="bob")
+        s.add_vector("um_facts", c, list(v), "m", owner="bob")
+        pairs = s.hygiene()["duplicate_facts"]
+        assert any({p[1], p[2]} == {a, b} for p in pairs)
+        assert all(c not in (p[1], p[2]) for p in pairs)  # owner-изоляция
+    finally:
+        s.close()
+
+
+def test_hygiene_no_vectors_no_duplicate_scan(tmp_path):
+    s = _store(tmp_path)
+    try:
+        s.add_fact("c", "a", "тело")
+        assert s.hygiene()["duplicate_facts"] == []
+    finally:
+        s.close()

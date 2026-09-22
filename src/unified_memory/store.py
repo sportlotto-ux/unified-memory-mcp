@@ -1701,6 +1701,42 @@ class Store:
                 "fts": self.fts}
 
     @_locked
+    def _duplicate_facts(self, threshold: float = 0.95, cap: int = 20,
+                         per_owner: int = 500) -> list:
+        """A5: near-дубли ЖИВЫХ фактов ВНУТРИ owner по косинусу (read-only).
+
+        Порог 0.95 фиксирован (косвенный сигнал, не приговор), пары капнуты.
+        Без векторов → пусто. owner-изоляция соблюдается группировкой.
+        """
+        vecs = self.conn.execute(
+            "SELECT owner_id, owner, embedding FROM um_vectors"
+            " WHERE owner_table='um_facts'").fetchall()
+        if not vecs:
+            return []
+        live = {r[0] for r in self.conn.execute(
+            "SELECT id FROM um_facts WHERE valid_until=0")}
+        by_owner: dict = {}
+        for oid, owner, blob in vecs:
+            if oid not in live or not blob:
+                continue
+            by_owner.setdefault(owner or "", []).append((oid, unpack_vector(blob)))
+        pairs: list = []
+        for items in by_owner.values():
+            items = items[:per_owner]
+            for i in range(len(items)):
+                vi = items[i][1]
+                for j in range(i + 1, len(items)):
+                    vj = items[j][1]
+                    if len(vi) != len(vj) or not vi:
+                        continue
+                    s = cosine(vi, vj)
+                    if s >= threshold:
+                        pairs.append(["um_facts", items[i][0], items[j][0],
+                                      round(s, 3)])
+                        if len(pairs) >= cap:
+                            return pairs
+        return pairs
+
     def _dangling_conditions(self) -> tuple[str, list]:
         """SQL-условие «живой линк с удалённым концом» (имена таблиц — из LINK_TABLES)."""
         conds: list = []
@@ -1724,7 +1760,7 @@ class Store:
         """Кандидаты мусора без мутаций: сироты векторов/FTS/сущностей, висячий vec0."""
         out: dict = {"orphan_vectors": [], "orphan_fts": [],
                      "orphan_entities": 0, "dangling_vecidx": [],
-                     "dangling_links": []}
+                     "dangling_links": [], "duplicate_facts": []}
         parents = {"um_messages": "SELECT id FROM um_messages",
                    "um_summaries": "SELECT id FROM um_summaries",
                    "um_facts": "SELECT id FROM um_facts",
@@ -1758,6 +1794,7 @@ class Store:
             except Exception:
                 pass
         out["dangling_links"] = self._dangling_link_ids(limit=11)
+        out["duplicate_facts"] = self._duplicate_facts()
         return out
 
     @_locked
