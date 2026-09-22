@@ -422,17 +422,19 @@ def mem_status() -> str:
 def mem_doctor(mode: str = "check", apply: bool = False) -> str:
     """DB diagnostics. mode: check (readonly: diagnostics + hygiene candidates) |
     export (readonly JSON dump to <db>.export-<ts>.json) |
+    retention (age-based: move hot messages older than UM_RETENTION_DAYS to archive) |
     clean (purge orphans) | repair (purge + FTS rebuild + vec rebuild).
-    clean/repair требуют apply=True (иначе dry-run) и всегда backup-first."""
+    clean/repair/retention требуют apply=True (иначе dry-run) и всегда backup-first."""
     store = _store()
     if mode == "check":
         return json.dumps({**store.diagnostics(), "hygiene": store.hygiene()})
     if mode == "export":
         from unified_memory.export import export_store
         return json.dumps(export_store(store), ensure_ascii=False)
-    if mode not in ("clean", "repair", "archive", "purge"):
+    if mode not in ("clean", "repair", "archive", "purge", "retention"):
         raise ValueError(
-            f"unknown mode {mode!r}: check | export | clean | repair | archive | purge")
+            f"unknown mode {mode!r}: check | export | clean | repair | archive"
+            " | purge | retention")
     cfg = _STATE["cfg"]
     if mode == "archive":
         if not apply:
@@ -470,6 +472,35 @@ def mem_doctor(mode: str = "check", apply: bool = False) -> str:
         finally:
             conn.close()
         return json.dumps({"mode": mode, "purged": purged})
+    if mode == "retention":
+        # (а) age-based проход: вынести горячее старше retention_days (для cron).
+        if cfg.retention_days <= 0:
+            return json.dumps({"mode": mode,
+                               "skipped": "retention_days=0 (keep forever)"})
+        before_ts = time.time() - cfg.retention_days * 86400
+        would = store.select(
+            "SELECT count(*) FROM um_messages WHERE"
+            " (externalized_ref IS NULL OR externalized_ref='')"
+            " AND created_at < ?", (before_ts,))[0][0]
+        if not apply:  # dry-run не создаёт архив
+            return json.dumps({"mode": mode, "apply_required": True,
+                               "would_move": would, "before_ts": before_ts})
+        if would == 0:  # нечего двигать — архив не открываем (P3.1-стиль)
+            return json.dumps({"mode": mode, "moved": 0, "before_ts": before_ts})
+        conn = archive.open_archive(cfg.archive_path)
+        try:
+            moved = 0
+            while True:  # до полного опустошения среза — идемпотентный второй прогон
+                n = archive.move_oldest(store, conn, cfg.archive_batch, before_ts,
+                                        label=str(cfg.archive_path))
+                moved += n
+                if n == 0:
+                    break
+            st = archive.status(conn, cfg.archive_path)
+        finally:
+            conn.close()
+        return json.dumps({"mode": mode, "moved": moved,
+                           "before_ts": before_ts, **st})
     if not apply:
         return json.dumps({"mode": mode, "apply_required": True,
                            "would": store.hygiene()})
