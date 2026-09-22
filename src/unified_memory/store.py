@@ -615,6 +615,40 @@ class Store:
         return out
 
     @_locked
+    def recent(self, start_ts: float, end_ts: float, session_id: str = "",
+               owner: str = "", limit: int = 20) -> list[dict]:
+        """Temporal выборка поверх messages+summaries: [start, end), свежие first."""
+        out: list[dict] = []
+        mq = ("SELECT id, session_id, content, created_at FROM um_messages"
+              " WHERE created_at >= ? AND created_at < ?")
+        mp: list = [start_ts, end_ts]
+        if session_id:
+            mq += " AND session_id=?"
+            mp.append(session_id)
+        if owner:
+            mq += " AND owner=?"
+            mp.append(owner)
+        for mid, sid, body, ts in self.conn.execute(
+                mq + " ORDER BY created_at DESC, id DESC LIMIT ?", (*mp, limit)):
+            out.append({"kind": "um_messages", "id": mid, "session_id": sid,
+                        "body": body, "created_at": ts})
+        sq = ("SELECT id, session_id, body, created_at FROM um_summaries"
+              " WHERE created_at >= ? AND created_at < ?")
+        sp: list = [start_ts, end_ts]
+        if session_id:
+            sq += " AND session_id=?"
+            sp.append(session_id)
+        if owner:
+            sq += " AND owner=?"
+            sp.append(owner)
+        for sid_, ssid, body, ts in self.conn.execute(
+                sq + " ORDER BY created_at DESC, id DESC LIMIT ?", (*sp, limit)):
+            out.append({"kind": "um_summaries", "id": sid_, "session_id": ssid,
+                        "body": body, "created_at": ts})
+        out.sort(key=lambda r: (-r["created_at"], -r["id"]))
+        return out[:limit]
+
+    @_locked
     def has_vector(self, owner_table: str, owner_id: int) -> bool:
         return self.conn.execute(
             "SELECT 1 FROM um_vectors WHERE owner_table=? AND owner_id=?",

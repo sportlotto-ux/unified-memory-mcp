@@ -27,6 +27,7 @@ from unified_memory.embeddings import make_backend  # noqa: E402
 from unified_memory.ingest import Ingest  # noqa: E402
 from unified_memory.store import Store  # noqa: E402
 from unified_memory.summarize import default_summarizer  # noqa: E402
+from unified_memory.recent import parse_period  # noqa: E402
 
 mcp = _Server("unified-memory")
 
@@ -153,6 +154,24 @@ def mem_forget(id: str = "", kind: str = "fact", owner: str = "") -> str:
 def mem_reindex(owner: str = "") -> str:
     """Embed owners missing vectors (ladder after a model change). Idempotent."""
     return json.dumps(_ingest().reindex(owner=owner))
+
+
+@mcp.tool()
+def mem_recent(period: str = "today", session_id: str = "",
+               owner: str = "", limit: int = 20) -> str:
+    """Temporal: what happened in a UTC window. Period: today | yesterday | week | month | Nd | date:YYYY-MM-DD | last Nh."""
+    window = parse_period(period)
+    items = _store().recent(window.start_ts, window.end_ts, session_id, owner, limit)
+    out = []
+    for it in items:
+        body = it["body"][:2000]
+        if len(it["body"]) > 2000:
+            body += "…[truncated, use mem_expand for full text]"
+        out.append({"kind": it["kind"], "id": it["id"], "session": it["session_id"],
+                    "created_at": it["created_at"], "body": body})
+    return json.dumps({"period": period, "window": {
+        "start": window.start_ts, "end": window.end_ts}, "items": out},
+        ensure_ascii=False)
 
 
 @mcp.tool()

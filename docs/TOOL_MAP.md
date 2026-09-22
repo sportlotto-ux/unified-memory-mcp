@@ -14,7 +14,8 @@
 
 | Новый тул | Поглощает | Решение |
 |---|---|---|
-| `mem_recall` | `lcm_recall` + `lcm_grep` + `mnemosyne_recall` + `lcm_recent` | Один recall: FTS + vectors + RRF + recency-приор + scope-bias + MMR; `scope:` выбирает current/all/recent. Убивает главный дубль |
+| `mem_recall` | `lcm_recall` + `lcm_grep` + `mnemosyne_recall` | Один recall: FTS + vectors + RRF + recency-приор + scope-bias + MMR; `scope:` выбирает all/session/facts. Убивает главный дубль |
+| `mem_recent` | `lcm_recent` + LCM rollup-периоды | Отдельный temporal-тул: UTC-окна как у LCM (`today`/`week`/`Nd`/`date:`/`last Nh`), поверх messages+summaries |
 | `mem_evidence` | `lcm_query_state` + `lcm_compute` + `lcm_compile_evidence` + `lcm_evidence_pack` + `lcm_retrieve` | Evidence-семья LCM (5 тулов) — сжать до 1–2 с режимами |
 | `mem_fact` | `remember_canonical` + `recall_canonical` + `triple_add/query` + `graph_*` | Факты/граф одной группой вместо 6 тулов (триплет — параметрами `subject/predicate/object`) |
 | `mem_assemble` | (новое, наследник LCM assembly) | Bounded активный контекст: summaries + fresh tail |
@@ -30,5 +31,5 @@
 
 ## Итого поверхность: ~40 тулов → ~8
 
-`mem_remember mem_recall mem_expand mem_fact mem_compact mem_assemble mem_forget mem_status mem_doctor mem_reindex`
+`mem_remember mem_recall mem_expand mem_fact mem_compact mem_assemble mem_forget mem_status mem_doctor mem_reindex mem_recent`
 (плюс отложенный `mem_evidence`)

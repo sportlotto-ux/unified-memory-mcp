@@ -64,7 +64,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 }
 ```
 
-## Тулы (10)
+## Тулы (11)
 
 | Тул | Что делает |
 |---|---|
@@ -73,6 +73,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 | `mem_recall` | Единый поиск: FTS + вектора + граф (1-hop) + RRF. `scope`: `all`/`session`/`facts` |
 | `mem_expand` | Дословно по `kind`+`id`, единая схема `{kind,id,body}` |
 | `mem_reindex` | Доложит недостающие вектора (лестница после смены модели) |
+| `mem_recent` | Temporal: что было в UTC-окне (`today`/`week`/`Nd`/`date:`/`last Nh`) |
 | `mem_compact` | Ручное сжатие старых сообщений (сырьё остаётся) |
 | `mem_assemble` | Bounded активный контекст: summaries + свежий хвост в бюджет токенов |
 | `mem_forget` | Удаление по `kind`: `fact`/`edge` (id) или `entity` (имя), каскадом |
@@ -118,7 +119,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 ## Разработка
 
 ```bash
-python -m pytest tests/ -q   # 90 passed, 3 skipped без fastembed; UM_LIVE_OPENAI=1 — live против 8127
+python -m pytest tests/ -q   # 96 passed, 3 skipped без fastembed; UM_LIVE_OPENAI=1 — live против 8127
 ```
 
 Roadmap и разбор апстримов: `docs/MIGRATION_PLAN.md`. Переезд с hermes-lcm/mnemosyne: `docs/IMPORT.md`.
