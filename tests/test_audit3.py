@@ -5,7 +5,7 @@ import pytest
 from fake_backend import FakeBackend
 from unified_memory.config import Config
 from unified_memory.ingest import Ingest
-from unified_memory.store import Store
+from unified_memory.store import Store, estimate_tokens
 from unified_memory.summarize import ExtractiveSummarizer
 
 
@@ -113,3 +113,44 @@ def test_reindex_no_backend(tmp_path):
             Ingest(store, None).reindex()
     finally:
         store.close()
+
+
+def test_counter_subtracts_superseded(ing):
+    for i in range(8):
+        ing.remember_message("s1", "user", f"факт {i} про запуск и отчёт" * 3)
+    live = ing.store.select(
+        "SELECT body FROM um_summaries WHERE session_id='s1' AND superseded_by=0")
+    msgs = ing.store.session_messages("s1", limit=1000000)
+    expect = sum(estimate_tokens(m["content"]) for m in msgs)
+    expect += sum(estimate_tokens(r[0]) for r in live)
+    assert int(ing.store.meta_get("tokens:s1")) == expect
+
+
+def test_recall_truncation_marked(tmp_path, monkeypatch):
+    monkeypatch.setenv("UM_DATABASE_PATH", str(tmp_path / "g.db"))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("UM_EMBEDDING_MODEL",
+                       "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+    import unified_memory.server as srv
+    srv._STATE.update(ingest=None, store=None, cfg=None, backend_error=None)
+    try:
+        srv.mem_remember(session_id="s", content="длинный текст " * 500)
+        import json
+        hits = json.loads(srv.mem_recall(query="длинный"))
+        assert hits and hits[0]["body"].endswith("…[truncated, use mem_expand for full text]")
+    finally:
+        srv._STATE["store"].close()
+        srv._STATE.update(ingest=None, store=None, cfg=None)
+
+
+def test_strict_env_rejected(tmp_path, monkeypatch):
+    monkeypatch.setenv("UM_DAG_FANIN", "мусор")
+    from unified_memory.config import load
+    with pytest.raises(ValueError):
+        load()
+
+
+def test_config_fresh_defaults(tmp_path, monkeypatch):
+    monkeypatch.setenv("UM_FRESH_TAIL_COUNT", "7")
+    from unified_memory.config import Config as C
+    assert C(db_path=tmp_path / "h.db").fresh_tail == 7

@@ -121,13 +121,26 @@ def cosine(a: list[float], b: list[float]) -> float:
     return dot / (na * nb)
 
 
-def estimate_tokens(text: str) -> int:
-    try:
-        import tiktoken
+_TIKTOKEN = {"enc": None, "tried": False}
 
-        return len(tiktoken.get_encoding("cl100k_base").encode(text))
-    except Exception:
-        return max(1, len(text) // 4)
+
+def _tiktoken_enc():
+    if not _TIKTOKEN["tried"]:
+        _TIKTOKEN["tried"] = True
+        try:
+            import tiktoken
+
+            _TIKTOKEN["enc"] = tiktoken.get_encoding("cl100k_base")
+        except Exception:
+            _TIKTOKEN["enc"] = None
+    return _TIKTOKEN["enc"]
+
+
+def estimate_tokens(text: str) -> int:
+    enc = _tiktoken_enc()
+    if enc is not None:
+        return len(enc.encode(text))
+    return max(1, len(text) // 4)
 
 
 def _locked(fn):
@@ -217,6 +230,7 @@ class Store:
             " ON CONFLICT(key) DO UPDATE"
             " SET value=CAST(value AS INTEGER)+CAST(excluded.value AS INTEGER)",
             (f"tokens:{session_id}", str(delta)))
+        self.conn.commit()
 
     @_locked
     def meta_set(self, key: str, value: str) -> None:

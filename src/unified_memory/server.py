@@ -12,7 +12,10 @@ import json
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
+try:
+    import unified_memory  # noqa: F401 — установленный пакет или -m: путь не трогаем
+except ImportError:  # прямой запуск файлом: src/unified_memory/server.py
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
 try:  # mcp 2.x: FastMCP renamed to MCPServer
     from mcp.server.mcpserver import MCPServer as _Server
@@ -84,9 +87,15 @@ def mem_recall(query: str, scope: str = "all", session_id: str = "",
                limit: int = 10) -> str:
     """Unified search: FTS + vectors + RRF. Scope: all | session | facts."""
     hits = _ingest().router().recall(query, scope, session_id, limit)
-    return json.dumps([{"kind": h.owner_table, "id": h.owner_id,
-                        "score": round(h.score, 4), "session": h.session_id,
-                        "body": h.body[:2000]} for h in hits], ensure_ascii=False)
+    out = []
+    for h in hits:
+        body = h.body[:2000]
+        if len(h.body) > 2000:
+            body += "…[truncated, use mem_expand for full text]"
+        out.append({"kind": h.owner_table, "id": h.owner_id,
+                    "score": round(h.score, 4), "session": h.session_id,
+                    "body": body})
+    return json.dumps(out, ensure_ascii=False)
 
 
 @mcp.tool()

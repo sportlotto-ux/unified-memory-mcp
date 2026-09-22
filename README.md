@@ -111,7 +111,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 ## Разработка
 
 ```bash
-python -m pytest tests/ -q   # 50 passed, 1 skipped без fastembed
+python -m pytest tests/ -q   # 54 passed, 1 skipped без fastembed
 ```
 
 Roadmap и разбор апстримов: `docs/MIGRATION_PLAN.md`. Переезд с hermes-lcm/mnemosyne: `docs/IMPORT.md`.

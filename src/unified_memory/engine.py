@@ -124,6 +124,9 @@ class ActiveWindow:
                 f"UPDATE um_summaries SET superseded_by={int(sid)}"
                 f" WHERE id IN ({','.join('?' * len(kids))})",
                 tuple(k[0] for k in kids))
+            # Счётчик честный: дети больше не в активном окне — вычитаем их тела.
+            self.store.bump_tokens(
+                session_id, -sum(estimate_tokens(k[1]) for k in kids))
             out.append({"from_depth": depth, "to_depth": depth + 1,
                         "summary_id": sid, "children": len(kids)})
         return out

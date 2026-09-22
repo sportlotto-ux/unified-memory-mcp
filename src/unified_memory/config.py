@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .embeddings import DEFAULT_MODEL
@@ -13,30 +13,67 @@ def _home() -> Path:
     return Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes")).expanduser()
 
 
-def _int(name: str, default: int) -> int:
-    try:
-        return int(os.environ.get(name, default))
-    except ValueError:
-        return default
+def _default_db() -> Path:
+    db = os.environ.get("UM_DATABASE_PATH")
+    return Path(db).expanduser() if db else _home() / "unified_memory.db"
 
 
-def _float(name: str, default: float) -> float:
-    try:
-        return float(os.environ.get(name, default))
-    except ValueError:
+def _default_model() -> str:
+    return os.environ.get("UM_EMBEDDING_MODEL", DEFAULT_MODEL)
+
+
+def _strict_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
         return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise ValueError(f"{name}={raw!r} is not an integer")
+
+
+def _strict_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        raise ValueError(f"{name}={raw!r} is not a number")
+
+
+def _default_ctx() -> int:
+    return _strict_int("UM_CONTEXT_TOKENS", 200000)
+
+
+def _default_thr() -> float:
+    return _strict_float("UM_COMPACT_THRESHOLD", 0.35)
+
+
+def _default_tail() -> int:
+    return _strict_int("UM_FRESH_TAIL_COUNT", 20)
+
+
+def _default_fanin() -> int:
+    return _strict_int("UM_DAG_FANIN", 5)
+
+
+def _default_budget() -> int:
+    return _strict_int("UM_ASSEMBLY_BUDGET", 8000)
 
 
 @dataclass(frozen=True)
 class Config:
-    db_path: Path = _home() / "unified_memory.db"
-    embedding_model: str = DEFAULT_MODEL
+    # default_factory читают env при каждой инстанциации —
+    # Config() без load() больше не протухший.
+    db_path: Path = field(default_factory=_default_db)
+    embedding_model: str = field(default_factory=_default_model)
     # Активное окно (наследники LCM-настроек, префикс UM_):
-    context_tokens: int = 200000   # эффективное окно хоста
-    compact_threshold: float = 0.35  # доля окна — триггер компакшна
-    fresh_tail: int = 20           # сообщений не жмём никогда
-    dag_fanin: int = 5             # нод одного уровня → одна выше
-    assembly_budget: int = 8000    # токенов в mem_assemble по дефолту
+    context_tokens: int = field(default_factory=_default_ctx)
+    compact_threshold: float = field(default_factory=_default_thr)
+    fresh_tail: int = field(default_factory=_default_tail)
+    dag_fanin: int = field(default_factory=_default_fanin)
+    assembly_budget: int = field(default_factory=_default_budget)
 
     def __post_init__(self) -> None:
         if self.context_tokens <= 0:
@@ -52,13 +89,4 @@ class Config:
 
 
 def load() -> Config:
-    db = os.environ.get("UM_DATABASE_PATH")
-    return Config(
-        db_path=Path(db).expanduser() if db else _home() / "unified_memory.db",
-        embedding_model=os.environ.get("UM_EMBEDDING_MODEL", DEFAULT_MODEL),
-        context_tokens=_int("UM_CONTEXT_TOKENS", 200000),
-        compact_threshold=_float("UM_COMPACT_THRESHOLD", 0.35),
-        fresh_tail=_int("UM_FRESH_TAIL_COUNT", 20),
-        dag_fanin=_int("UM_DAG_FANIN", 5),
-        assembly_budget=_int("UM_ASSEMBLY_BUDGET", 8000),
-    )
+    return Config()
