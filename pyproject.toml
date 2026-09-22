@@ -23,6 +23,10 @@ local-vec = [
 tokens = [
     "tiktoken>=0.7",
 ]
+dev = [
+    "pytest",
+    "hypothesis>=6",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

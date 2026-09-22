@@ -80,7 +80,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 | `mem_batch` | Атомарный батч записей (all-or-nothing): ops `remember_fact` \| `update` (fact/edge/link) \| `forget` (fact/edge/link). `dry_run=true` — валидация с откатом. Без кросс-ссылок; каждый op в savepoint; текст идёт через redaction-гейт |
 | `mem_update` | Правка факта по id (новая версия, history живёт) или истечение/reopen факта/ребра/связи (`valid_until`) |
 | `mem_recall` | Единый поиск: FTS + вектора + граф + RRF. `scope`: `all`/`session`/`facts`; `as_of` — срез графа на дату; `include_expired` — история; `hops>1` — BFS-обход типизированных связей и entity-графа, `rel` фильтрует связи (`supports`/`contradicts`/`supersedes`/`derives_from`; на рёбрах — `predicate`). `diagnostics=true` → `{hits, diagnostics}` (per-arm counts/вклад/timings/BFS), `false` — прежний список |
-| `mem_recent` | Temporal: что было в UTC-окне (`today`/`yesterday`/`week`/`month`/`Nd`/`date:`/`last Nh`) |
+| `mem_recent` | Temporal: что было в UTC-окне (`today`/`yesterday`/`week`/`month`/`Nd`/`date:`/`last Nh`); пагинация старых страниц через `before_id`+`before_ts` из `next` |
 | `mem_expand` | Дословно по `kind`+`id`, единая схема `{kind,id,body}` |
 | `mem_evidence` | Проверка опоры на refs: `cite` (дословно/почти → supported/partial/unsupported), `compute` (агрегация чисел над refs: count/sum/min/max/avg/median), `conflicts` (кандидаты противоречий без вердикта, `needs_judgment`). Без LLM, только переданные refs |
 | `mem_reindex` | Доложит недостающие вектора (лестница после смены модели) |
@@ -135,23 +135,25 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 | `UM_FRESH_TAIL_COUNT` | `20` | Свежих сообщений не жмём никогда |
 | `UM_DAG_FANIN` | `5` | Нод уровня → одна выше |
 | `UM_ASSEMBLY_BUDGET` | `8000` | Токенов в `mem_assemble` по дефолту |
+| `UM_MAX_TEXT_CHARS` | `200000` | Кап входного текста (громкий `ValueError`, не тихая обрезка) |
+| `UM_COMPACT_MAX_MSGS` | `10000` | Кап головы компакшна за проход (остаток досжимается следующим вызовом) |
 
 ## Известные ограничения (v0.7)
 
 Полный список отложенного — `docs/BACKLOG.md`.
 
 - Архив выносит только **сообщения** (текст+вектор) — основной драйвер роста. Истёкшие факты/рёбра и `um_summaries` — TODO (`docs/BACKLOG.md`).
-- `mem_doctor(mode=export)` пишет дамп целиком в память (стриминга в v1 нет), архив в дамп не включается — это отдельный вечный файл холода.
+- `mem_doctor(mode=export)` пишет **стриминговый JSONL** (`um-export-jsonl`: header + `{table,row}` построчно; вектора base64, um_fts/um_vecidx исключены). Импорт — `python -m unified_memory.import_dump <file> [--owner] [--dry-run]`, аддитивный (fresh-id remap, слот-конфликт → skip), без backend. **Чтение дампа — целиком в память** (стриминг только на записи).
 - Isolation добровольная: `owner=""` (дефолт) — legacy без фильтра, видит всё; строгая изоляция — только при непустом `owner`. Старые БД мигрируют сами (`owner=''`), сущности пересобираются под `UNIQUE(name, owner)`.
 - Redaction forward-only: сторa, созданные до v0.4, могут содержать секреты — чистить руками + reindex.
 - Смена embedding-модели требует reindex (падает громко, `DimensionMismatchError`): ранние сторa на MiniLM-384 с дефолтом mpnet-768 несовместимы — пересоздайте БД или задайте `UM_EMBEDDING_MODEL` явно.
 - Cron-режима нет (демона нет), но age-based проход (а) теперь есть вручную/по cron: `mem_doctor(mode=retention, apply=true)` выносит горячее старше `UM_RETENTION_DAYS` (dry-run без `apply` считает `would_move`, идемпотентен). Ленивый недельный проход на ingest остаётся.
-- Новая версия факта (`mem_update` со сменой тела и `mem_batch` `update` с `body`) создаётся **без вектора** до следующего `mem_reindex` — наследованное поведение одиночного `mem_update`, не регрессия батча.
+- Пагинации **ранжированного** `mem_recall` нет и не будет: возвращаемый порядок — fused-релевантность, а не стабильный ключ; «следующие N» через offset даст недетерминированную выдачу. Сужайте запрос/увеличивайте `limit`. Пагинация есть только у хронологического `mem_recent` (`before_id`+`before_ts`).
 
 ## Разработка
 
 ```bash
-python -m pytest tests/ -q   # 252 passed, 5 skipped без fastembed/vec/tiktoken; UM_LIVE_OPENAI=1 — live против 8127
+python -m pytest tests/ -q   # 281 passed, 6 skipped без fastembed/vec/tiktoken/hypothesis; UM_LIVE_OPENAI=1 — live против 8127
 ```
 
 Прогон герметичен: `tests/conftest.py` снимает ambient `UM_*` (иначе шелл с

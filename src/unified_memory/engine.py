@@ -85,8 +85,11 @@ class ActiveWindow:
             return {"status": "ok", **base}
         fkey = _mkey("frontier", session_id, owner)
         frontier = int(self.store.meta_get(fkey) or 0)
+        # D15: голова ограничена frontier'ом и капом (не 1M-скан). Если свежих
+        # сообщений больше капа — сожмём первые cap, frontier сдвинется к их
+        # концу; остаток досжимается следующим вызовом (покрытие не теряется).
         msgs = self.store.session_messages(session_id, after_id=frontier,
-                                            limit=1000000, owner=owner)
+                                            limit=self.cfg.compact_max_msgs, owner=owner)
         report: dict = {"status": "compacted", **base}
         fresh = msgs[-self.cfg.fresh_tail:] if self.cfg.fresh_tail else []
         fresh_ids = {m["id"] for m in fresh}
@@ -189,7 +192,10 @@ class ActiveWindow:
             used += t
         picked_sums.reverse()
         tail, tused = [], 0
-        msgs = self.store.session_messages(session_id, limit=1000000, owner=owner)
+        # D15: тянем только возможный хвост (каждое сообщение >= 1 токена, значит
+        # больше budget штук в бюджет не влезет) — DESC/LIMIT, без чтения сессии.
+        msgs = self.store.session_messages_tail(session_id, limit=max(1, budget),
+                                                owner=owner)
         for m in reversed(msgs):
             t = estimate_tokens(m["content"])
             if used + tused + t > budget and tail:

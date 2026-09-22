@@ -800,6 +800,26 @@ class Store:
         return [dict(zip(keys, r)) for r in rows]
 
     @_locked
+    def session_messages_tail(self, session_id: str, limit: int = 50,
+                              owner: str = "", after_id: int = 0) -> list[dict]:
+        """D15: свежие `limit` сообщений (ASC на выходе) одним DESC/LIMIT-запросом.
+
+        Бюджет/хвост считаются по токенам в Python, поэтому для сборки контекста
+        достаточно прочитать не всю сессию, а только возможный хвост."""
+        q = ("SELECT id, session_id, role, content, created_at, source FROM um_messages"
+             " WHERE session_id=? AND id>?")
+        params: list = [session_id, after_id]
+        if owner:
+            q += " AND owner=?"
+            params.append(owner)
+        q += " AND (externalized_ref IS NULL OR externalized_ref='')"
+        rows = self.conn.execute(q + " ORDER BY id DESC LIMIT ?",
+                                 (*params, limit)).fetchall()
+        rows.reverse()  # на выходе — по возрастанию id, как session_messages
+        keys = ["id", "session_id", "role", "content", "created_at", "source"]
+        return [dict(zip(keys, r)) for r in rows]
+
+    @_locked
     def fts_search(self, query: str, scope: str = "all",
                    session_id: str = "", limit: int = 20,
                    owner: str = "",
@@ -1090,9 +1110,19 @@ class Store:
 
     @_locked
     def recent(self, start_ts: float, end_ts: float, session_id: str = "",
-               owner: str = "", limit: int = 20) -> list[dict]:
-        """Temporal выборка поверх messages+summaries: [start, end), свежие first."""
+               owner: str = "", limit: int = 20,
+               before_ts: float = 0.0, before_id: int = 0) -> list[dict]:
+        """Temporal выборка поверх messages+summaries: [start, end), свежие first.
+
+        D14-пагинация: (before_ts, before_id) — эксклюзивный курсор «строго
+        старше» (timeline сливает две таблицы, один id неоднозначен). 0/0 = первая
+        страница."""
         out: list[dict] = []
+        cur = ""
+        curs: list = []
+        if before_ts or before_id:
+            cur = " AND (created_at < ? OR (created_at = ? AND id < ?))"
+            curs = [before_ts, before_ts, before_id]
         mq = ("SELECT id, session_id, content, created_at FROM um_messages"
               " WHERE created_at >= ? AND created_at < ?")
         mp: list = [start_ts, end_ts]
@@ -1104,7 +1134,8 @@ class Store:
             mp.append(owner)
         mq += " AND (externalized_ref IS NULL OR externalized_ref='')"
         for mid, sid, body, ts in self.conn.execute(
-                mq + " ORDER BY created_at DESC, id DESC LIMIT ?", (*mp, limit)):
+                mq + cur + " ORDER BY created_at DESC, id DESC LIMIT ?",
+                (*mp, *curs, limit)):
             out.append({"kind": "um_messages", "id": mid, "session_id": sid,
                         "body": body, "created_at": ts})
         sq = ("SELECT id, session_id, body, created_at FROM um_summaries"
@@ -1117,7 +1148,8 @@ class Store:
             sq += " AND owner=?"
             sp.append(owner)
         for sid_, ssid, body, ts in self.conn.execute(
-                sq + " ORDER BY created_at DESC, id DESC LIMIT ?", (*sp, limit)):
+                sq + cur + " ORDER BY created_at DESC, id DESC LIMIT ?",
+                (*sp, *curs, limit)):
             out.append({"kind": "um_summaries", "id": sid_, "session_id": ssid,
                         "body": body, "created_at": ts})
         out.sort(key=lambda r: (-r["created_at"], -r["id"]))

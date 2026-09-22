@@ -1,0 +1,21 @@
+# v0.8 E18: полный прогон на тяжёлых extras (fastembed / sqlite-vec / tiktoken)
+# + dev (hypothesis, E21 fuzz). Отдельный workflow с cron — НЕ required-check
+# для PR: флаки загрузки моделей не должны блокировать мержи. Основной CI
+# (pytest.yml) гоняет лёгкую матрицу 3.11–3.13 на каждом push/PR.
+name: weekly-full
+
+on:
+  schedule:
+    - cron: "0 4 * * 1"   # понедельник 04:00 UTC
+  workflow_dispatch:
+
+jobs:
+  full:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[tokens,local-embed,local-vec,dev]"
+      - run: python -m pytest tests/ -q

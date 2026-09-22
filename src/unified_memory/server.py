@@ -312,10 +312,13 @@ def mem_reindex(owner: str = "") -> str:
 
 @mcp.tool(annotations=_ann(ro=True, idem=True))
 def mem_recent(period: str = "today", session_id: str = "",
-               owner: str = "", limit: int = 20) -> str:
-    """Temporal: what happened in a UTC window. Period: today | yesterday | week | month | Nd | date:YYYY-MM-DD | last Nh."""
+               owner: str = "", limit: int = 20,
+               before_id: int = 0, before_ts: float = 0.0) -> str:
+    """Temporal: what happened in a UTC window. Period: today | yesterday | week | month | Nd | date:YYYY-MM-DD | last Nh.
+    Paging: pass the returned next.before_id + next.before_ts to get the next (older) page."""
     window = parse_period(period)
-    items = _store().recent(window.start_ts, window.end_ts, session_id, owner, limit)
+    items = _store().recent(window.start_ts, window.end_ts, session_id, owner, limit,
+                            before_ts=before_ts, before_id=before_id)
     out = []
     for it in items:
         body = it["body"][:2000]
@@ -323,9 +326,11 @@ def mem_recent(period: str = "today", session_id: str = "",
             body += "…[truncated, use mem_expand for full text]"
         out.append({"kind": it["kind"], "id": it["id"], "session": it["session_id"],
                     "created_at": it["created_at"], "body": body})
+    nxt = ({"before_ts": items[-1]["created_at"], "before_id": items[-1]["id"]}
+           if len(items) == limit and items else None)
     return json.dumps({"period": period, "window": {
-        "start": window.start_ts, "end": window.end_ts}, "items": out},
-        ensure_ascii=False)
+        "start": window.start_ts, "end": window.end_ts}, "items": out,
+        "next": nxt}, ensure_ascii=False)
 
 
 def _archive_fetch(cfg):

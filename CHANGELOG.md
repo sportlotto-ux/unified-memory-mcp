@@ -18,6 +18,16 @@
   аддитивность (skip-слот без перезаписи), owner-override, без re-redaction, отказ на
   неизвестную таблицу/версию; работает без backend; весь импорт транзакционен.
 - **C13**: batch-op `remember` (сообщение) в `mem_batch`.
+### Changed
+- **D15**: `mem_assemble` читает только возможный хвост (`DESC/LIMIT`), а `mem_compact`
+  ограничен `UM_COMPACT_MAX_MSGS` (дефолт 10000) вместо 1M-скана; выдача та же.
+- **D14**: `mem_recent` — пагинация старых страниц (`before_id`+`before_ts` из `next`).
+### Security
+- **E21**: fuzz-свойства redaction (hypothesis, extra `dev`): нет совпадений каталога
+  в выходе, идемпотентность, deadline против ReDoS.
+### Internal
+- **E18**: отдельный weekly CI-workflow на тяжёлых extras (+hypothesis), не required-check.
+- **C12**: in-process smoke (in-memory MCP: 15 тулов + recall round-trip).
 ### Fixed
 - Явный `weight=0.0` у линка больше не съедается дефолтом 1.0; `hops=None` в `Router`
   нормализуется в 1 (аудит v0.7.3, P4).
