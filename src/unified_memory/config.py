@@ -74,6 +74,34 @@ def _default_timeout() -> float:
     return _strict_float("UM_EMBEDDING_TIMEOUT", 30.0)
 
 
+def _strict_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    v = raw.strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    raise ValueError(f"{name}={raw!r} is not a boolean")
+
+
+def _default_redact() -> bool:
+    # Публичный продукт: default ON (у LCM off — то для себя).
+    return _strict_bool("UM_REDACT_ENABLED", True)
+
+
+def _default_redact_patterns() -> tuple[str, ...]:
+    from .redact import ALL, PATTERNS
+
+    raw = os.environ.get("UM_REDACT_PATTERNS")
+    names = [p.strip().lower() for p in raw.split(",")] if raw else list(ALL)
+    unknown = [p for p in names if p not in PATTERNS]
+    if unknown:
+        raise ValueError(f"UM_REDACT_PATTERNS unknown: {unknown}, known: {list(ALL)}")
+    return tuple(names)
+
+
 @dataclass(frozen=True)
 class Config:
     # default_factory читают env при каждой инстанциации —
@@ -91,6 +119,9 @@ class Config:
     embedding_backend: str = field(default_factory=_default_backend)
     embedding_base_url: str = field(default_factory=_default_base_url)
     embedding_timeout: float = field(default_factory=_default_timeout)
+    # Redaction-гейт (v0.4-п.1): default ON, каталог как у LCM.
+    redact_enabled: bool = field(default_factory=_default_redact)
+    redact_patterns: tuple[str, ...] = field(default_factory=_default_redact_patterns)
 
     def __post_init__(self) -> None:
         if self.embedding_backend not in ("local", "openai"):
@@ -101,6 +132,8 @@ class Config:
             raise ValueError("UM_EMBEDDING_BASE_URL must be non-empty for backend='openai'")
         if self.embedding_timeout <= 0:
             raise ValueError("UM_EMBEDDING_TIMEOUT must be > 0")
+        if self.redact_enabled and not self.redact_patterns:
+            raise ValueError("UM_REDACT_PATTERNS must be non-empty when redaction is enabled")
         if self.context_tokens <= 0:
             raise ValueError("UM_CONTEXT_TOKENS must be > 0")
         if not 0.0 < self.compact_threshold <= 1.0:

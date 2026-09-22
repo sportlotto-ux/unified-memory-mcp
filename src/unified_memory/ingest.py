@@ -21,12 +21,22 @@ class Ingest:
         self.store = store
         self.backend = backend
         self.summarizer = summarizer
-        self.window = ActiveWindow(store, summarizer, cfg or Config())
+        self.cfg = cfg or Config()
+        self.window = ActiveWindow(store, summarizer, self.cfg)
+
+    def _clean(self, text: str) -> str:
+        """Redaction-гейт: весь входящий текст — через него до SQLite/FTS/vectors."""
+        if self.cfg.redact_enabled:
+            from .redact import redact_text
+
+            return redact_text(text, self.cfg.redact_patterns)
+        return text
 
     def remember_message(self, session_id: str, role: str, content: str,
                          source: str = "mcp") -> dict:
         if not (content or "").strip():
             raise ValueError("empty content: nothing to remember")
+        content = self._clean(content)
         mid = self.store.add_message(session_id, role, content, source)
         if self.backend is not None:
             self.store.add_vector("um_messages", mid,
@@ -38,6 +48,8 @@ class Ingest:
                       importance: float = 0.5, subject: str = "",
                       predicate: str = "", obj: str = "",
                       session_id: str = "") -> int:
+        name, body = self._clean(name), self._clean(body)
+        subject, predicate, obj = (self._clean(s) for s in (subject, predicate, obj))
         fid = self.store.add_fact(category, name, body, importance)
         if self.backend is not None:
             self.store.add_vector("um_facts", fid,

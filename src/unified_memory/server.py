@@ -160,6 +160,8 @@ def mem_status() -> str:
                        "embedding_backend": cfg.embedding_backend,
                        "embedding_model": cfg.embedding_model,
                        "embedding_dim": ing.backend.dim if ing.backend else 0,
+                       "redaction_enabled": cfg.redact_enabled,
+                       "redaction_patterns": list(cfg.redact_patterns),
                        "backend_error": _STATE["backend_error"],
                        "summarizer": type(default_summarizer()).__name__,
                        "db": str(cfg.db_path)})

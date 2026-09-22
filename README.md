@@ -86,6 +86,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 - **Поиск:** FTS5 (fallback LIKE) + cosine по векторам + RRF. Без fastembed — честный FTS-режим, `mem_status` так и скажет (`vectors_enabled: false`), молчаливого «вроде ищет» нет.
 - **Сжатие:** давление = токены сессии vs `UM_CONTEXT_TOKENS × UM_COMPACT_THRESHOLD` (дефолт 200k × 0.35, как LCM). Накрыло → старые (всё кроме `UM_FRESH_TAIL_COUNT` свежих) в summary depth 0; каждые `UM_DAG_FANIN` нод уровня схлопываются в уровень выше. Frontier в `um_meta` — каждое сообщение жмётся один раз. `mem_assemble` собирает bounded контекст под бюджет.
 - **Защита от старых болячек:** нет жёсткого `importance: 0.95` (причина canonical-bloat в mnemosyne) — кап `0..1`; смена embedding-модели без reindex — громкая ошибка, а не тихая деградация recall.
+- **Redaction:** гейт на входе (`UM_REDACT_ENABLED`, дефолт ON): `api_key,bearer_token,password_assignment,private_key` — каталог и регулярки как у LCM. Режется до SQLite/FTS/vectors/summaries, плейсхолдер `[UM redaction: name=...; chars=N]` необратим. Forward-only: что попало в стор раньше — чистить руками + reindex.
 
 ## Переменные окружения
 
@@ -97,6 +98,8 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 | `UM_EMBEDDING_BASE_URL` | `http://127.0.0.1:8127` | База для backend=openai |
 | `UM_EMBEDDING_TIMEOUT` | `30.0` | Таймаут HTTP, сек |
 | `UM_EMBEDDING_DIM` | — | Пропустить probe dim (openai), полезно оффлайн |
+| `UM_REDACT_ENABLED` | `true` | Гейт секретов на входе (дефолт ON — продукт публичный) |
+| `UM_REDACT_PATTERNS` | `api_key,bearer_token,password_assignment,private_key` | Подмножество каталога через запятую |
 | `UM_SUMMARIZER_URL` / `UM_SUMMARIZER_MODEL` | — | LLM-пересказ; без них extractive |
 | `UM_SUMMARIZER_API_KEY` | — | Bearer для endpoint |
 | `UM_CONTEXT_TOKENS` | `200000` | Эффективное окно хоста |
@@ -108,14 +111,14 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 ## Известные ограничения (v0.3)
 
 - Нет user-isolation: один стор на инсталляцию, мультитенантность не предусмотрена.
-- Нет redaction чувствительных данных (у LCM есть `SENSITIVE_PATTERNS`) — не кладите секреты или чистите руками.
+- Redaction forward-only: сторa, созданные до v0.4, могут содержать секреты — чистить руками + reindex.
 - `UM_VEC_TYPE` удалён: вектора всегда float32, конфиг больше не врёт.
 - Смена embedding-модели требует reindex (зато громко падает, а не молча врёт — см. `DimensionMismatchError`). Ранние сторa на MiniLM-384 с дефолтом mpnet-768 несовместимы: пересоздайте БД или задайте `UM_EMBEDDING_MODEL` явно.
 
 ## Разработка
 
 ```bash
-python -m pytest tests/ -q   # 64 passed, 3 skipped без fastembed; UM_LIVE_OPENAI=1 — live против 8127
+python -m pytest tests/ -q   # 76 passed, 3 skipped без fastembed; UM_LIVE_OPENAI=1 — live против 8127
 ```
 
 Roadmap и разбор апстримов: `docs/MIGRATION_PLAN.md`. Переезд с hermes-lcm/mnemosyne: `docs/IMPORT.md`.
