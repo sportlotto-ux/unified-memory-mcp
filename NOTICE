@@ -1,0 +1,8 @@
+This repository merges two MIT-licensed upstreams (code is referenced,
+not yet vendored — stages 1-4 in docs/MIGRATION_PLAN.md):
+
+- hermes-lcm — https://github.com/stephenschoettler/hermes-lcm — MIT
+- mnemosyne (mnemosyne-memory + mnemosyne-hermes) — https://github.com/AxDSan/mnemosyne — MIT
+
+All upstream copyrights belong to their authors. New kernel code
+(src/unified_memory/*) is MIT, contributors listed in git history.
