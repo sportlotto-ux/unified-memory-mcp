@@ -29,13 +29,14 @@ def test_fts_scope_pushdown_not_starved(tmp_path):
 
 
 def test_fts_returns_relevance_order(tmp_path):
-    """rank-порядок: точное совпадение короткого тела выше размытого длинного."""
+    """rank-порядок: короткое точное тело должно обойти длинное размытое."""
     s = _store(tmp_path)
     try:
-        s.add_message("s", "user", "цель " + "шум " * 30)
-        s.add_message("s", "user", "цель")
+        noisy = s.add_message("s", "user", "цель " + "шум " * 30)
+        exact = s.add_message("s", "user", "цель")
         hits = s.fts_search("цель", scope="all", limit=2)
-        assert hits and hits[0].owner_id  # обе ветки не падают, порядок стабилен
+        assert {h.owner_id for h in hits} >= {exact, noisy}
+        assert hits[0].owner_id == exact  # bm25 length-norm: короче → лучше
     finally:
         s.close()
 
@@ -99,4 +100,5 @@ def test_lazy_ingest_initialized_once(tmp_path, monkeypatch):
         assert calls["load"] == 1 and calls["backend"] == 1
         assert len({id(g) for g in got}) == 1
     finally:
-        srv._STATE.get("store") and srv._STATE["store"].close()
+        if srv._STATE.get("store") is not None:
+            srv._STATE["store"].close()
