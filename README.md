@@ -16,8 +16,13 @@ git clone https://github.com/sportlotto-ux/unified-memory-mcp
 cd unified-memory-mcp
 pip install -e .                    # база: FTS-поиск + extractive-сжатие, всё из коробки
 pip install -e .[local-embed]       # + семантика: локальный fastembed, CPU, без облаков
-pip install -e .[tokens]            # + точный подсчёт токенов (tiktoken/cl100k) для компакшна
+pip install -e .[tokens]            # рекомендуется: точный tiktoken/cl100k для бюджета и компакшна
 ```
+
+> Токен-оценщик общий для компакшна и `mem_assemble`. Без `.[tokens]` работает
+> детерминированная RU-aware эвристика — пороги компакшна она держит, но на
+> смешанном RU/EN/коде погрешность накапливается иначе, чем на однородном тексте;
+> для жёсткого бюджетного счёта ставьте `.[tokens]`.
 
 Требования: Python 3.11+, SQLite из коробки. Опционально для настоящего пересказа:
 
@@ -80,7 +85,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 | `mem_evidence` | Проверка опоры на refs: `cite` (дословно/почти → supported/partial/unsupported), `compute` (агрегация чисел над refs: count/sum/min/max/avg/median), `conflicts` (кандидаты противоречий без вердикта, `needs_judgment`). Без LLM, только переданные refs |
 | `mem_reindex` | Доложит недостающие вектора (лестница после смены модели) |
 | `mem_compact` | Ручное сжатие старых сообщений (сырьё остаётся) |
-| `mem_assemble` | Bounded активный контекст: summaries + свежий хвост в бюджет токенов |
+| `mem_assemble` | Bounded активный контекст: summaries + свежий хвост в бюджет токенов (бюджет считается токен-оценщиком; для жёсткой арифметики — `.[tokens]`) |
 | `mem_forget` | Удаление по `kind`: `fact`/`edge`/`link` (id) или `entity` (имя), каскадом |
 | `mem_status` | Счётчики + флаги деградации (`vectors_enabled`, `summarizer`, `fts`) |
 | `mem_doctor` | `integrity_check`, вектора по моделям, hygiene; read-only `export` (JSON-дамп в `<db>.export-<ts>.json`, вектора base64, архив не входит); мутации `clean`/`repair` (backup-first), `archive`/`purge`/`retention` (только с `apply=true`; `retention` — age-based вынос горячего старше `UM_RETENTION_DAYS`) |
@@ -90,7 +95,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 - **Хранение:** одна SQLite (WAL): `um_messages` + `um_summaries` (DAG) + `um_facts` + `um_entities`/`um_edges` (граф) + `um_links` (типизированные связи, traversal-only) + `um_vectors` + `um_fts` (FTS5) + `um_meta`.
 - **Эмбеддинги:** два бэкенда. `local` (дефолт репо) — fastembed, модель `paraphrase-multilingual-mpnet-base-v2` (768, не дистиллят); для лёгких стендов MiniLM-L12 через `UM_EMBEDDING_MODEL`. `openai` — OpenAI-протокол `/v1/embeddings` поверх stdlib (ноль зависимостей): так подключается локальный model2vec-сервер Hermes (`UM_EMBEDDING_BASE_URL`, дефолт `http://127.0.0.1:8127`, potion = 256 dim, авто-детект). Держи сервер uncapped — static-модели молча режут после 512 токенов при выставленном `EMBED_MAX_TOKENS`.
 - **Поиск:** FTS5 (fallback LIKE) + cosine по векторам + RRF, поверх — recency-приор (`UM_RECENCY_HALFLIFE_DAYS`, дефолт 30, 0=off), scope-bias текущей сессии (`UM_SCOPE_BIAS`, дефолт 0.15) и MMR-диверсификация по Жаккару (`UM_MMR_LAMBDA`, дефолт 0.7, 1=off). При `pip install -e .[local-vec]` + `mem_reindex` — vec0-индекс (KNN-кандидаты + точный косинусный перескоринг, паритет с brute force пробами); без индекса — честный фулскан. Без fastembed — честный FTS-режим, `mem_status` так и скажет (`vectors_enabled: false`), молчаливого «вроде ищет» нет.
-- **Сжатие:** давление = токены сессии vs `UM_CONTEXT_TOKENS × UM_COMPACT_THRESHOLD` (дефолт 200k × 0.35, как LCM). Токены: при `pip install -e .[tokens]` — точный tiktoken/cl100k, иначе детерминированная RU-aware эвристика (`ASCII/4 + не-ASCII/2`; голый `len//4` занижал кириллицу ~2.3x). Накрыло → старые (всё кроме `UM_FRESH_TAIL_COUNT` свежих) в summary depth 0; каждые `UM_DAG_FANIN` нод уровня схлопываются в уровень выше. Frontier в `um_meta` — каждое сообщение жмётся один раз. `mem_assemble` собирает bounded контекст под бюджет.
+- **Сжатие:** давление = токены сессии vs `UM_CONTEXT_TOKENS × UM_COMPACT_THRESHOLD` (дефолт 200k × 0.35, как LCM). Токены: при `pip install -e .[tokens]` — точный tiktoken/cl100k, иначе детерминированная RU-aware эвристика (`ASCII/4 + не-ASCII/2`; голый `len//4` занижал кириллицу ~2.3x). Накрыло → старые (всё кроме `UM_FRESH_TAIL_COUNT` свежих) в summary depth 0; каждые `UM_DAG_FANIN` нод уровня схлопываются в уровень выше. Frontier в `um_meta` — каждое сообщение жмётся один раз. `mem_assemble` собирает bounded контекст под бюджет тем же оценщиком.
 - **Защита от старых болячек:** нет жёсткого `importance: 0.95` (причина canonical-bloat в mnemosyne) — кап `0..1`; смена embedding-модели без reindex — громкая ошибка, а не тихая деградация recall.
 - **Redaction:** гейт на входе (`UM_REDACT_ENABLED`, дефолт ON): `api_key,bearer_token,password_assignment,private_key` — каталог и регулярки как у LCM. Режется до SQLite/FTS/vectors/summaries, плейсхолдер `[UM redaction: name=...; chars=N]` необратим. Forward-only: что попало в стор раньше — чистить руками + reindex.
 - **Retention/архив (lossless-холод):** `UM_RETENTION_DAYS` = **сколько держать ГОРЯЧЕЕ** (recall быстрый, БД маленькая), а не срок жизни данных. `0` (дефолт) = копим всё в горячей вечно. `>0` → раз в неделю (ленивый проход) горячее старше N дней уезжает в архив. Архив — **отдельный файл, lossless**, живёт вечно; **автоудаления нет** — физическое `purge` только вручную (`mem_doctor(mode=purge, apply=true)`). При пороге размера (`UM_ARCHIVE_SIZE_MB`, дефолт 1 ГБ) старейшее добивается до порога. В архив уезжают текст **и вектор** (вариант a2 — так порог реально держится), в горячей остаётся заглушка `[archived]`, `mem_expand` прозрачно достаёт текст из архива. Ручной `purge` режет архив по тому же `UM_RETENTION_DAYS` — то есть вычищает ровно строки старше N (при `retention_days>0` это почти весь холод, **осознанно**); при `retention_days=0` `purge` — no-op.
