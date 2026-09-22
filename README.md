@@ -40,7 +40,7 @@ export UM_SUMMARIZER_MODEL=qwen3:8b
 }
 ```
 
-## Тулы (8)
+## Тулы (9)
 
 | Тул | Что делает |
 |---|---|
@@ -76,10 +76,17 @@ export UM_SUMMARIZER_MODEL=qwen3:8b
 | `UM_DAG_FANIN` | `5` | Нод уровня → одна выше |
 | `UM_ASSEMBLY_BUDGET` | `8000` | Токенов в `mem_assemble` по дефолту |
 
+## Известные ограничения (v0.3)
+
+- Нет user-isolation: один стор на инсталляцию, мультитенантность не предусмотрена.
+- Нет redaction чувствительных данных (у LCM есть `SENSITIVE_PATTERNS`) — не кладите секреты или чистите руками.
+- `UM_VEC_TYPE` объявлен, но не реализован (вектора всегда float32).
+- Смена embedding-модели требует reindex (зато громко падает, а не молча врёт — см. `DimensionMismatchError`). Ранние сторa на MiniLM-384 с дефолтом mpnet-768 несовместимы: пересоздайте БД или задайте `UM_EMBEDDING_MODEL` явно.
+
 ## Разработка
 
 ```bash
-python -m pytest tests/ -q   # 11 passed, 1 skipped без fastembed
+python -m pytest tests/ -q   # 39 passed, 1 skipped без fastembed
 ```
 
 Roadmap и разбор апстримов: `docs/MIGRATION_PLAN.md`. Переезд с hermes-lcm/mnemosyne: `docs/IMPORT.md`.

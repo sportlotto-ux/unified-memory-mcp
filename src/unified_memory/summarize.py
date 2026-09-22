@@ -86,7 +86,13 @@ class EndpointSummarizer:
         )
         with urllib.request.urlopen(req, timeout=self.timeout) as resp:
             data = json.loads(resp.read().decode())
-        return data["choices"][0]["message"]["content"].strip()
+        try:
+            content = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as e:
+            raise ValueError(f"summarizer endpoint returned no content: {data!r:.200}") from e
+        if not content or not content.strip():
+            raise ValueError("summarizer endpoint returned empty content")
+        return content.strip()
 
 
 def _auth_header() -> dict:

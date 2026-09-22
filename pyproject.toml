@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-unified-memory"
-version = "0.1.0"
+version = "0.3.2"
 description = "Unified Hermes memory MCP: hermes-lcm + mnemosyne merged"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -16,9 +16,6 @@ dependencies = [
 [project.optional-dependencies]
 local-embed = [
     "fastembed>=0.3",
-]
-sqlite-vec = [
-    "sqlite-vec>=0.1",
 ]
 
 [tool.setuptools.packages.find]

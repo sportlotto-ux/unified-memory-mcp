@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS um_summaries (
     body TEXT NOT NULL,
     covers_from INTEGER,
     covers_to INTEGER,
+    superseded_by INTEGER NOT NULL DEFAULT 0,  -- #2: схлопнуто в ноду ( lineage живёт)
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_um_summaries_session ON um_summaries(session_id, depth);
@@ -119,6 +120,15 @@ def cosine(a: list[float], b: list[float]) -> float:
     return dot / (na * nb)
 
 
+def estimate_tokens(text: str) -> int:
+    try:
+        import tiktoken
+
+        return len(tiktoken.get_encoding("cl100k_base").encode(text))
+    except Exception:
+        return max(1, len(text) // 4)
+
+
 def _locked(fn):
     import functools
 
@@ -155,6 +165,11 @@ class Store:
         if "fact_id" not in cols:
             self.conn.execute("ALTER TABLE um_edges ADD COLUMN fact_id INTEGER NOT NULL DEFAULT 0")
             self.conn.commit()
+        scols = [r[1] for r in self.conn.execute("PRAGMA table_info(um_summaries)")]
+        if "superseded_by" not in scols:
+            self.conn.execute(
+                "ALTER TABLE um_summaries ADD COLUMN superseded_by INTEGER NOT NULL DEFAULT 0")
+            self.conn.commit()
         try:
             self.conn.executescript(_FTS_SCHEMA)
             self.fts = True
@@ -178,6 +193,25 @@ class Store:
         return row[0] if row else None
 
     @_locked
+    def select(self, sql: str, params: tuple = ()) -> list[tuple]:
+        """#6: чтение из движка только через лок."""
+        return self.conn.execute(sql, params).fetchall()
+
+    @_locked
+    def execute_write(self, sql: str, params: tuple = ()) -> int:
+        """#6: запись из движка только через лок. Возвращает rowcount."""
+        cur = self.conn.execute(sql, params)
+        self.conn.commit()
+        return cur.rowcount
+
+    def bump_tokens(self, session_id: str, delta: int) -> None:
+        """#3: инкрементный счётчик давления. Вызывать из locked-контекста."""
+        self.conn.execute(
+            "INSERT INTO um_meta(key, value) VALUES(?,?)"
+            " ON CONFLICT(key) DO UPDATE SET value=value+excluded.value",
+            (f"tokens:{session_id}", str(delta)))
+
+    @_locked
     def meta_set(self, key: str, value: str) -> None:
         self.conn.execute(
             "INSERT INTO um_meta(key, value) VALUES(?,?)"
@@ -195,6 +229,7 @@ class Store:
         )
         mid = cur.lastrowid
         self._fts_index("um_messages", mid, content)
+        self.bump_tokens(session_id, estimate_tokens(content))
         self.conn.commit()
         return mid
 
@@ -223,6 +258,7 @@ class Store:
         )
         sid = cur.lastrowid
         self._fts_index("um_summaries", sid, body)
+        self.bump_tokens(session_id, estimate_tokens(body))
         self.conn.commit()
         return sid
 
@@ -272,7 +308,11 @@ class Store:
     @_locked
     def fts_search(self, query: str, scope: str = "all",
                    session_id: str = "", limit: int = 20) -> list[Hit]:
-        """Полнотекст: FTS5 при наличии, иначе LIKE по токенам."""
+        """Полнотекст: FTS5 при наличии, иначе LIKE по токенам.
+
+        Trigram-FTS не ищет термы короче 3 символов («да», «он») — для таких
+        запросов сразу идём в LIKE, а не возвращаем пусто (#1).
+        """
         terms = tokenize(query)
         if not terms:
             return []
@@ -280,8 +320,8 @@ class Store:
                   "session": ["um_messages", "um_summaries", "um_edges"],
                   "facts": ["um_facts"]}.get(
                       scope, ["um_messages", "um_summaries", "um_facts", "um_edges"])
-        if self.fts:
-            match = " OR ".join(f'"{t}"' for t in terms[:10])
+        if self.fts and max(len(t) for t in terms) >= 3:
+            match = " OR ".join(f'"{t}"' for t in terms[:10] if len(t) >= 3)
             q = ("SELECT owner_table, owner_id FROM um_fts WHERE um_fts MATCH ? LIMIT ?")
             try:
                 rows = self.conn.execute(q, (match, limit * 3)).fetchall()
@@ -520,11 +560,21 @@ class Store:
     def stats(self) -> dict:
         out = {}
         for t in ["um_messages", "um_summaries", "um_facts", "um_vectors",
-           "um_entities", "um_edges"]:
+                  "um_entities", "um_edges"]:
             out[t] = self.conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
         out["fts"] = self.fts
         out["embedding_model"] = self.meta_get("embedding_model")
         return out
+
+    @_locked
+    def diagnostics(self) -> dict:
+        """#6: integrity + вектора по моделям через лок."""
+        integ = self.conn.execute("PRAGMA integrity_check").fetchone()[0]
+        vec_rows = self.conn.execute(
+            "SELECT model, count(*) FROM um_vectors GROUP BY model").fetchall()
+        return {"integrity": integ,
+                "vectors_by_model": [list(r) for r in vec_rows],
+                "fts": self.fts}
 
     @_locked
     def close(self) -> None:

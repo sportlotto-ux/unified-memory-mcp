@@ -14,17 +14,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .config import Config
-from .store import Store
+from .store import Store, estimate_tokens
 from .summarize import Summarizer
-
-
-def estimate_tokens(text: str) -> int:
-    try:
-        import tiktoken
-
-        return len(tiktoken.get_encoding("cl100k_base").encode(text))
-    except Exception:
-        return max(1, len(text) // 4)
 
 
 @dataclass
@@ -47,13 +38,23 @@ class ActiveWindow:
         return int(self.cfg.context_tokens * self.cfg.compact_threshold)
 
     def pressure(self, session_id: str) -> Pressure:
-        msgs = self.store.session_messages(session_id, limit=1000000)
-        sums = self.store.conn.execute(
-            "SELECT body FROM um_summaries WHERE session_id=?", (session_id,)).fetchall()
-        total = sum(estimate_tokens(m["content"]) for m in msgs)
-        total += sum(estimate_tokens(r[0]) for r in sums)
+        # #3: инкрементный счётчик вместо полного скана на каждое сообщение.
+        raw = self.store.meta_get(f"tokens:{session_id}")
+        if raw is None:  # старая БД — один полный скан, дальше инкремент
+            msgs = self.store.session_messages(session_id, limit=1000000)
+            sums = self.store.select(
+                "SELECT body FROM um_summaries WHERE session_id=?", (session_id,))
+            total = sum(estimate_tokens(m["content"]) for m in msgs)
+            total += sum(estimate_tokens(r[0]) for r in sums)
+            self.store.meta_set(f"tokens:{session_id}", str(total))
+        else:
+            total = int(raw)
+        n_msgs = self.store.select(
+            "SELECT count(*) FROM um_messages WHERE session_id=?", (session_id,))[0][0]
+        n_sums = self.store.select(
+            "SELECT count(*) FROM um_summaries WHERE session_id=?", (session_id,))[0][0]
         th = self.threshold_tokens()
-        return Pressure(total, th, total >= th, len(msgs), len(sums))
+        return Pressure(total, th, total >= th, n_msgs, n_sums)
 
     def maybe_compact(self, session_id: str) -> dict:
         """Авто-компакшн при превышении порога. Bounded: проход + конденсация.
@@ -87,28 +88,38 @@ class ActiveWindow:
         return report
 
     def condense(self, session_id: str, max_passes: int = 10) -> list[dict]:
-        """Схлопнуть каждые `fanin` нод уровня d в одну ноду d+1."""
+        """Схлопнуть каждые `fanin` живых нод уровня d в одну ноду d+1.
+
+        Дети помечаются superseded_by (давление и сборка их пропускают,
+        lineage для drill-down живёт) — #2.
+        """
         if self.summarizer is None:
             return []
         out: list[dict] = []
         for _ in range(max_passes):
-            rows = self.store.conn.execute(
+            rows = self.store.select(
                 "SELECT depth, count(*) FROM um_summaries WHERE session_id=?"
+                " AND superseded_by=0"
                 " GROUP BY depth HAVING count(*) >= ? ORDER BY depth LIMIT 1",
-                (session_id, self.cfg.dag_fanin)).fetchone()
+                (session_id, self.cfg.dag_fanin))
             if not rows:
                 break
-            depth = rows[0]
-            kids = self.store.conn.execute(
+            depth = rows[0][0]
+            kids = self.store.select(
                 "SELECT id, body, covers_from, covers_to FROM um_summaries"
-                " WHERE session_id=? AND depth=? ORDER BY id LIMIT ?",
-                (session_id, depth, self.cfg.dag_fanin)).fetchall()
+                " WHERE session_id=? AND depth=? AND superseded_by=0"
+                " ORDER BY id LIMIT ?",
+                (session_id, depth, self.cfg.dag_fanin))
             body = self.summarizer.summarize([k[1] for k in kids], max_sentences=8)
             covers = [c for k in kids for c in (k[2], k[3]) if c is not None]
             sid = self.store.add_summary(
                 session_id, body, depth=depth + 1,
                 covers_from=min(covers) if covers else None,
                 covers_to=max(covers) if covers else None)
+            self.store.execute_write(
+                f"UPDATE um_summaries SET superseded_by={int(sid)}"
+                f" WHERE id IN ({','.join('?' * len(kids))})",
+                tuple(k[0] for k in kids))
             out.append({"from_depth": depth, "to_depth": depth + 1,
                         "summary_id": sid, "children": len(kids)})
         return out
@@ -117,9 +128,9 @@ class ActiveWindow:
         """Bounded активный контекст: свежие summaries + свежий хвост, по старшинству."""
         budget = budget or self.cfg.assembly_budget
         half = budget // 2
-        sums = self.store.conn.execute(
+        sums = self.store.select(
             "SELECT id, depth, body FROM um_summaries WHERE session_id=?"
-            " ORDER BY depth DESC, id DESC", (session_id,)).fetchall()
+            " AND superseded_by=0 ORDER BY depth DESC, id DESC", (session_id,))
         picked_sums, used = [], 0
         for sid, depth, body in sums:
             t = estimate_tokens(body)
@@ -136,7 +147,7 @@ class ActiveWindow:
                         break
                     acc.append(s)
                     cut += st
-                if acc:
+                if acc and cut <= half:
                     body = " ".join(acc) + " …[truncated]"
                     t = cut
                 else:

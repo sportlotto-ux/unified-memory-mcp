@@ -16,7 +16,11 @@
 |---|---|---|
 | `mem_recall` | `lcm_recall` + `lcm_grep` + `mnemosyne_recall` + `lcm_recent` | Один recall: FTS + vectors + RRF; `scope:` выбирает current/all/recent. Убивает главный дубль |
 | `mem_evidence` | `lcm_query_state` + `lcm_compute` + `lcm_compile_evidence` + `lcm_evidence_pack` + `lcm_retrieve` | Evidence-семья LCM (5 тулов) — сжать до 1–2 с режимами |
-| `mem_fact` | `remember_canonical` + `recall_canonical` + `triple_add/query` + `graph_*` | Факты/граф одной группой вместо 6 тулов |
+| `mem_fact` | `remember_canonical` + `recall_canonical` + `triple_add/query` + `graph_*` | Факты/граф одной группой вместо 6 тулов (триплет — параметрами `subject/predicate/object`) |
+| `mem_assemble` | (новое, наследник LCM assembly) | Bounded активный контекст: summaries + fresh tail |
+| `mem_compact` | ручной триггер LCM-compaction | + авто-компакшн в `mem_remember` по порогу давления |
+
+> `mem_evidence` (сжатие evidence-семьи LCM: query_state/compute/compile/evidence_pack/retrieve в 1–2 тула) — **отложено**, в v0.3 нет. Не обещаем то, чего нет.
 
 ## Падающие (не переносим)
 

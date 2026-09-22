@@ -49,8 +49,10 @@ def test_assemble_bounded(ing):
         ing.remember_message("s1", "user", f"пункт {i} повестки совещания" * 3)
     asm = ing.window.assemble("s1")
     # bounded с гарантией «новейшее сообщение всегда внутри» (как LCM fresh tail):
-    # перелёт только на одно сообщение
-    assert asm["tokens"] <= asm["budget"] + 30
+    # перелёт не больше одного сообщения
+    from unified_memory.store import estimate_tokens
+    newest = ing.store.session_messages("s1", limit=1000000)[-1]["content"]
+    assert asm["tokens"] <= asm["budget"] + estimate_tokens(newest)
     assert asm["truncated_tail"] is True
     # хвост — самые свежие
     assert "пункт 9" in asm["tail"][-1]["content"]

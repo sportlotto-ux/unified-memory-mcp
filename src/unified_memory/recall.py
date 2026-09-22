@@ -39,6 +39,8 @@ class Router:
 
     def recall(self, query: str, scope: str = "all", session_id: str = "",
                limit: int = 10) -> list[Hit]:
+        if scope == "session" and not session_id:
+            return []  # #5: без session_id граф/поиск вернули бы чужие данные
         lists: list[list[Hit]] = []
         fts_hits = self.store.fts_search(query, scope=scope, session_id=session_id,
                                          limit=limit * 2)

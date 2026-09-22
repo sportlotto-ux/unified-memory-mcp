@@ -27,31 +27,46 @@ from unified_memory.summarize import default_summarizer  # noqa: E402
 
 mcp = _Server("unified-memory")
 
+_STATE = {"ingest": None, "store": None, "cfg": None, "backend_error": None}
 
-def _backend():
+
+def _backend(cfg):
     try:
         import fastembed  # noqa: F401
     except ImportError:
         return None  # FTS-only режим, флаг виден в mem_status
-    cfg = load()
     b = FastembedBackend(model=cfg.embedding_model)
-    b.warm()
+    b.warm()  # может кинуть на битой сети — ловим ниже, сервер стартует
     return b
 
 
-_BACKEND = _backend()
-_CFG = load()
-_STORE = Store(_CFG,
-               embedding_dim=_BACKEND.dim if _BACKEND else 0,
-               embedding_model=_CFG.embedding_model if _BACKEND else "")
-_INGEST = Ingest(_STORE, _BACKEND, default_summarizer(), _CFG)
+def _ingest():
+    """#7: ленивая инициализация. Ошибка сети/модели роняет вектора, не сервер."""
+    if _STATE["ingest"] is None:
+        cfg = load()
+        try:
+            backend = _backend(cfg)
+        except Exception as e:  # noqa: BLE001 — любой сбой warm = FTS-only
+            backend = None
+            _STATE["backend_error"] = f"{type(e).__name__}: {e}"[:300]
+        store = Store(cfg,
+                      embedding_dim=backend.dim if backend else 0,
+                      embedding_model=cfg.embedding_model if backend else "")
+        _STATE.update(store=store, cfg=cfg,
+                      ingest=Ingest(store, backend, default_summarizer(), cfg))
+    return _STATE["ingest"]
+
+
+def _store():
+    _ingest()
+    return _STATE["store"]
 
 
 @mcp.tool()
 def mem_remember(session_id: str = "default", role: str = "user",
                  content: str = "") -> str:
     """Save a session message. Auto-compacts past the pressure threshold."""
-    return json.dumps(_INGEST.remember_message(session_id, role, content))
+    return json.dumps(_ingest().remember_message(session_id, role, content))
 
 
 @mcp.tool()
@@ -60,7 +75,7 @@ def mem_fact(category: str, name: str, body: str,
              predicate: str = "", object: str = "",
              session_id: str = "") -> str:
     """Save a long-term fact, optionally with a graph triple. Returns its id."""
-    return json.dumps({"id": _INGEST.remember_fact(
+    return json.dumps({"id": _ingest().remember_fact(
         category, name, body, importance, subject, predicate, object, session_id)})
 
 
@@ -68,7 +83,7 @@ def mem_fact(category: str, name: str, body: str,
 def mem_recall(query: str, scope: str = "all", session_id: str = "",
                limit: int = 10) -> str:
     """Unified search: FTS + vectors + RRF. Scope: all | session | facts."""
-    hits = _INGEST.router().recall(query, scope, session_id, limit)
+    hits = _ingest().router().recall(query, scope, session_id, limit)
     return json.dumps([{"kind": h.owner_table, "id": h.owner_id,
                         "score": round(h.score, 4), "session": h.session_id,
                         "body": h.body[:2000]} for h in hits], ensure_ascii=False)
@@ -78,23 +93,25 @@ def mem_recall(query: str, scope: str = "all", session_id: str = "",
 def mem_expand(kind: str, id: int) -> str:
     """Verbatim fetch. kind: message | fact | summary | edge."""
     if kind == "message":
-        return json.dumps(_STORE.get_message(int(id)), ensure_ascii=False)
+        return json.dumps(_store().get_message(int(id)), ensure_ascii=False)
     table = {"fact": "um_facts", "summary": "um_summaries",
-             "edge": "um_edges"}[kind]
-    body, _ = _STORE._body_of(table, int(id))
+             "edge": "um_edges"}.get(kind)
+    if table is None:
+        raise ValueError(f"unknown kind {kind!r}: message | fact | summary | edge")
+    body, _ = _store()._body_of(table, int(id))
     return json.dumps({"kind": kind, "id": int(id), "body": body}, ensure_ascii=False)
 
 
 @mcp.tool()
 def mem_compact(session_id: str, keep_tail: int = 20) -> str:
     """Summarize old session messages. Raw messages are kept (lossless)."""
-    return json.dumps(_INGEST.compact_session(session_id, keep_tail))
+    return json.dumps(_ingest().compact_session(session_id, keep_tail))
 
 
 @mcp.tool()
 def mem_assemble(session_id: str, budget: int = 0) -> str:
     """Bounded active context: ready summaries + fresh tail within budget."""
-    return json.dumps(_INGEST.window.assemble(session_id, budget),
+    return json.dumps(_ingest().window.assemble(session_id, budget),
                       ensure_ascii=False)
 
 
@@ -102,30 +119,29 @@ def mem_assemble(session_id: str, budget: int = 0) -> str:
 def mem_forget(id: str = "", kind: str = "fact") -> str:
     """Delete by kind: fact (numeric id), edge (numeric id), entity (name)."""
     if kind == "fact":
-        return json.dumps({"deleted": _STORE.delete_fact(int(id))})
+        return json.dumps({"deleted": _store().delete_fact(int(id))})
     if kind == "edge":
-        return json.dumps({"deleted": _STORE.delete_edge(int(id))})
+        return json.dumps({"deleted": _store().delete_edge(int(id))})
     if kind == "entity":
-        return json.dumps({"deleted": _STORE.delete_entity(id)})
+        return json.dumps({"deleted": _store().delete_entity(id)})
     raise ValueError(f"unknown kind {kind!r}: fact | edge | entity")
 
 
 @mcp.tool()
 def mem_status() -> str:
     """Store stats and degradation flags."""
-    return json.dumps({**_STORE.stats(), "vectors_enabled": _BACKEND is not None,
+    ing = _ingest()
+    return json.dumps({**ing.store.stats(),
+                       "vectors_enabled": ing.backend is not None,
+                       "backend_error": _STATE["backend_error"],
                        "summarizer": type(default_summarizer()).__name__,
-                       "db": str(_CFG.db_path)})
+                       "db": str(_STATE["cfg"].db_path)})
 
 
 @mcp.tool()
 def mem_doctor() -> str:
     """DB diagnostics: integrity, vectors by model, FTS flag."""
-    integ = _STORE.conn.execute("PRAGMA integrity_check").fetchone()[0]
-    vec_rows = _STORE.conn.execute(
-        "SELECT model, count(*) FROM um_vectors GROUP BY model").fetchall()
-    return json.dumps({"integrity": integ, "vectors_by_model": vec_rows,
-                       "fts": _STORE.fts})
+    return json.dumps(_store().diagnostics())
 
 
 def main():
