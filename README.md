@@ -82,7 +82,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 ## Как это работает
 
 - **Хранение:** одна SQLite (WAL): `um_messages` + `um_summaries` (DAG) + `um_facts` + `um_entities`/`um_edges` (граф) + `um_vectors` + `um_meta`.
-- **Эмбеддинги:** дефолт репо — полная `paraphrase-multilingual-mpnet-base-v2` (768, не дистиллят). Для лёгких стендов — дистиллированная MiniLM-L12 через `UM_EMBEDDING_MODEL` (так стоит у автора в Hermes).
+- **Эмбеддинги:** два бэкенда. `local` (дефолт репо) — fastembed, модель `paraphrase-multilingual-mpnet-base-v2` (768, не дистиллят); для лёгких стендов MiniLM-L12 через `UM_EMBEDDING_MODEL`. `openai` — OpenAI-протокол `/v1/embeddings` поверх stdlib (ноль зависимостей): так подключается локальный model2vec-сервер Hermes (`UM_EMBEDDING_BASE_URL`, дефолт `http://127.0.0.1:8127`, potion = 256 dim, авто-детект). Держи сервер uncapped — static-модели молча режут после 512 токенов при выставленном `EMBED_MAX_TOKENS`.
 - **Поиск:** FTS5 (fallback LIKE) + cosine по векторам + RRF. Без fastembed — честный FTS-режим, `mem_status` так и скажет (`vectors_enabled: false`), молчаливого «вроде ищет» нет.
 - **Сжатие:** давление = токены сессии vs `UM_CONTEXT_TOKENS × UM_COMPACT_THRESHOLD` (дефолт 200k × 0.35, как LCM). Накрыло → старые (всё кроме `UM_FRESH_TAIL_COUNT` свежих) в summary depth 0; каждые `UM_DAG_FANIN` нод уровня схлопываются в уровень выше. Frontier в `um_meta` — каждое сообщение жмётся один раз. `mem_assemble` собирает bounded контекст под бюджет.
 - **Защита от старых болячек:** нет жёсткого `importance: 0.95` (причина canonical-bloat в mnemosyne) — кап `0..1`; смена embedding-модели без reindex — громкая ошибка, а не тихая деградация recall.
@@ -92,7 +92,11 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 | Переменная | Дефолт | Назначение |
 |---|---|---|
 | `UM_DATABASE_PATH` | `~/.hermes/unified_memory.db` | Путь к БД |
-| `UM_EMBEDDING_MODEL` | `paraphrase-multilingual-mpnet-base-v2` (768) | Модель fastembed строго из реестра |
+| `UM_EMBEDDING_MODEL` | `paraphrase-multilingual-mpnet-base-v2` (768) | local: модель fastembed строго из реестра; openai: passthrough-имя |
+| `UM_EMBEDDING_BACKEND` | `local` | `local` (fastembed) \| `openai` (8127/любой OpenAI-совместимый) |
+| `UM_EMBEDDING_BASE_URL` | `http://127.0.0.1:8127` | База для backend=openai |
+| `UM_EMBEDDING_TIMEOUT` | `30.0` | Таймаут HTTP, сек |
+| `UM_EMBEDDING_DIM` | — | Пропустить probe dim (openai), полезно оффлайн |
 | `UM_SUMMARIZER_URL` / `UM_SUMMARIZER_MODEL` | — | LLM-пересказ; без них extractive |
 | `UM_SUMMARIZER_API_KEY` | — | Bearer для endpoint |
 | `UM_CONTEXT_TOKENS` | `200000` | Эффективное окно хоста |
@@ -111,7 +115,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 ## Разработка
 
 ```bash
-python -m pytest tests/ -q   # 54 passed, 1 skipped без fastembed
+python -m pytest tests/ -q   # 64 passed, 3 skipped без fastembed; UM_LIVE_OPENAI=1 — live против 8127
 ```
 
 Roadmap и разбор апстримов: `docs/MIGRATION_PLAN.md`. Переезд с hermes-lcm/mnemosyne: `docs/IMPORT.md`.

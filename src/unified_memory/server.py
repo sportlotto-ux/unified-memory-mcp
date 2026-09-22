@@ -23,7 +23,7 @@ except ImportError:  # mcp 1.x
     from mcp.server.fastmcp import FastMCP as _Server  # type: ignore
 
 from unified_memory.config import load  # noqa: E402
-from unified_memory.embeddings import FastembedBackend  # noqa: E402
+from unified_memory.embeddings import make_backend  # noqa: E402
 from unified_memory.ingest import Ingest  # noqa: E402
 from unified_memory.store import Store  # noqa: E402
 from unified_memory.summarize import default_summarizer  # noqa: E402
@@ -34,12 +34,11 @@ _STATE = {"ingest": None, "store": None, "cfg": None, "backend_error": None}
 
 
 def _backend(cfg):
-    try:
-        import fastembed  # noqa: F401
-    except ImportError:
-        return None  # FTS-only режим, флаг виден в mem_status
-    b = FastembedBackend(model=cfg.embedding_model)
-    b.warm()  # может кинуть на битой сети — ловим ниже, сервер стартует
+    # local без fastembed → ImportError на warm; openai без сервера →
+    # EmbedServerError на warm. Оба ловит _ingest: сервер стартует FTS-only,
+    # причина видна в mem_status.backend_error. Молчаливых нулей нет.
+    b = make_backend(cfg)
+    b.warm()  # проба связи + детект dim (openai) / загрузка модели (local)
     return b
 
 
@@ -155,11 +154,15 @@ def mem_reindex() -> str:
 def mem_status() -> str:
     """Store stats and degradation flags."""
     ing = _ingest()
+    cfg = _STATE["cfg"]
     return json.dumps({**ing.store.stats(),
                        "vectors_enabled": ing.backend is not None,
+                       "embedding_backend": cfg.embedding_backend,
+                       "embedding_model": cfg.embedding_model,
+                       "embedding_dim": ing.backend.dim if ing.backend else 0,
                        "backend_error": _STATE["backend_error"],
                        "summarizer": type(default_summarizer()).__name__,
-                       "db": str(_STATE["cfg"].db_path)})
+                       "db": str(cfg.db_path)})
 
 
 @mcp.tool()

@@ -62,6 +62,18 @@ def _default_budget() -> int:
     return _strict_int("UM_ASSEMBLY_BUDGET", 8000)
 
 
+def _default_backend() -> str:
+    return os.environ.get("UM_EMBEDDING_BACKEND", "local").strip().lower()
+
+
+def _default_base_url() -> str:
+    return os.environ.get("UM_EMBEDDING_BASE_URL", "http://127.0.0.1:8127").rstrip("/")
+
+
+def _default_timeout() -> float:
+    return _strict_float("UM_EMBEDDING_TIMEOUT", 30.0)
+
+
 @dataclass(frozen=True)
 class Config:
     # default_factory читают env при каждой инстанциации —
@@ -74,8 +86,21 @@ class Config:
     fresh_tail: int = field(default_factory=_default_tail)
     dag_fanin: int = field(default_factory=_default_fanin)
     assembly_budget: int = field(default_factory=_default_budget)
+    # Эмбеддинги: local (fastembed, default) | openai (OpenAI-протокол,
+    # например локальный model2vec-сервер Hermes на 127.0.0.1:8127).
+    embedding_backend: str = field(default_factory=_default_backend)
+    embedding_base_url: str = field(default_factory=_default_base_url)
+    embedding_timeout: float = field(default_factory=_default_timeout)
 
     def __post_init__(self) -> None:
+        if self.embedding_backend not in ("local", "openai"):
+            raise ValueError(
+                "UM_EMBEDDING_BACKEND must be 'local' or 'openai', "
+                f"got {self.embedding_backend!r}")
+        if self.embedding_backend == "openai" and not self.embedding_base_url:
+            raise ValueError("UM_EMBEDDING_BASE_URL must be non-empty for backend='openai'")
+        if self.embedding_timeout <= 0:
+            raise ValueError("UM_EMBEDDING_TIMEOUT must be > 0")
         if self.context_tokens <= 0:
             raise ValueError("UM_CONTEXT_TOKENS must be > 0")
         if not 0.0 < self.compact_threshold <= 1.0:
