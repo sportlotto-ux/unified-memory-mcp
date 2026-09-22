@@ -510,6 +510,12 @@ class Store:
             self.conn.execute(
                 "UPDATE um_edges SET valid_until=? WHERE fact_id=? AND valid_until=0",
                 (now, fid))
+            # P4.8: вектор вытесненной версии не нужен (FTS оставляем — на нём
+            # держится include_expired). Reopen вернёт факт без вектора до mem_reindex.
+            self._vec_delete("um_facts", fid)
+            self.conn.execute(
+                "DELETE FROM um_vectors WHERE owner_table='um_facts' AND owner_id=?",
+                (fid,))
             self._fts_index("um_facts", nid, f"{name} {body}")
             self._commit_if(_commit)
             return {"id": nid, "status": "superseded", "superseded_id": fid}
@@ -577,6 +583,11 @@ class Store:
                 self.conn.execute(
                     "UPDATE um_edges SET valid_until=?"
                     " WHERE fact_id=? AND valid_until=0", (vu, fid))
+                # P4.8: вектор истёкшей версии убираем (FTS — оставляем).
+                self._vec_delete("um_facts", fid)
+                self.conn.execute(
+                    "DELETE FROM um_vectors WHERE owner_table='um_facts' AND owner_id=?",
+                    (fid,))
                 self._commit_if(_commit)
                 if body is not None and body != cur_body:
                     raise ValueError(
