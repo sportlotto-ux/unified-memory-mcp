@@ -27,7 +27,7 @@ from unified_memory.embeddings import make_backend  # noqa: E402
 from unified_memory.ingest import Ingest  # noqa: E402
 from unified_memory.store import Store  # noqa: E402
 from unified_memory.summarize import default_summarizer  # noqa: E402
-from unified_memory.recent import parse_period, parse_when  # noqa: E402
+from unified_memory.recent import parse_as_of, parse_period, parse_when  # noqa: E402
 
 mcp = _Server("unified-memory")
 
@@ -87,11 +87,13 @@ def mem_fact(category: str, name: str, body: str,
 @mcp.tool()
 def mem_recall(query: str, scope: str = "all", session_id: str = "",
                limit: int = 10, owner: str = "",
-               include_expired: bool = False) -> str:
+               include_expired: bool = False, as_of: str = "") -> str:
     """Unified search: FTS + vectors + RRF. Scope: all | session | facts.
-    Истёкшие (valid_until) прячутся; include_expired=True — аудит истории."""
+    Истёкшие (valid_until) прячутся (include_expired=True — аудит истории).
+    as_of (ISO-date) — срез графа на дату: valid_from <= as_of < valid_until."""
+    as_of_ts = parse_as_of(as_of) if as_of else None
     hits = _ingest().router().recall(query, scope, session_id, limit, owner,
-                                     include_expired)
+                                     include_expired, as_of_ts)
     out = []
     for h in hits:
         body = h.body[:2000]

@@ -108,3 +108,25 @@ def parse_when(value: str, now: datetime | None = None) -> float | None:
     except ValueError as exc:
         raise ValueError(
             "valid_until must be '', 'open', 'now', YYYY-MM-DD or epoch") from exc
+
+
+def parse_as_of(value: str, now: datetime | None = None) -> float | None:
+    """Момент среза графа. "" = нет среза. ISO-date — КОНЕЦ тех суток
+    (включает рёбра, созданные в тот день). "now"/epoch — как есть."""
+    if value is None or not str(value).strip():
+        return None
+    v = str(value).strip().lower()
+    if v in ("open", "0"):
+        raise ValueError("as_of must be a date/epoch, not the reopen sentinel")
+    current = _utc_now(now)
+    if v == "now":
+        return current.timestamp()
+    try:
+        d = date.fromisoformat(v)
+        return _day_start(d + timedelta(days=1)).timestamp()  # конец суток
+    except ValueError:
+        pass
+    try:
+        return float(v)
+    except ValueError as exc:
+        raise ValueError("as_of must be '', 'now', YYYY-MM-DD or epoch") from exc

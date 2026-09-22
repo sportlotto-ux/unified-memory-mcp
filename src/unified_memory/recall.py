@@ -49,7 +49,8 @@ class Router:
 
     def recall(self, query: str, scope: str = "all", session_id: str = "",
                limit: int = 10, owner: str = "",
-               include_expired: bool = False) -> list[Hit]:
+               include_expired: bool = False,
+               as_of: float | None = None) -> list[Hit]:
         if scope not in VALID_SCOPES:
             raise ValueError(f"unknown scope {scope!r}: {VALID_SCOPES}")
         if limit <= 0:
@@ -60,7 +61,7 @@ class Router:
         lists: list[list[Hit]] = []
         fts_hits = self.store.fts_search(query, scope=scope, session_id=session_id,
                                          limit=limit * 2, owner=owner,
-                                         include_expired=include_expired)
+                                         include_expired=include_expired, as_of=as_of)
         if fts_hits:
             lists.append(fts_hits)
         if self.backend is not None:
@@ -87,7 +88,13 @@ class Router:
                 cand = [(ot, oid, vec) for ot, oid, vec in all_vecs
                         if len(vec) == len(qv)]
                 self.last_stats["dim_skipped"] = len(all_vecs) - len(cand)
-            if cand and not include_expired:
+            if cand and as_of is not None:
+                win = self.store.window_for([(ot, oid) for ot, oid, _ in cand])
+                cand = [(ot, oid, v) for ot, oid, v in cand
+                        if (lambda w: w is None or
+                            (w[0] <= as_of and (w[1] == 0 or w[1] > as_of)))(
+                                win.get((ot, oid)))]
+            elif cand and not include_expired:
                 now = time.time()
                 val = self.store.validity_for([(ot, oid) for ot, oid, _ in cand])
                 cand = [(ot, oid, v) for ot, oid, v in cand
@@ -108,7 +115,7 @@ class Router:
             if scored:
                 lists.append(scored[:limit * 2])
         graph_hits = self._graph_arm(query, scope, session_id, limit * 2, owner,
-                                     include_expired)
+                                     include_expired, as_of)
         if graph_hits:
             lists.append(graph_hits)
         if not lists:
@@ -165,8 +172,9 @@ class Router:
 
     def _graph_arm(self, query: str, scope: str, session_id: str,
                    limit: int, owner: str = "",
-                   include_expired: bool = False) -> list[Hit]:
-        """1-hop expansion: совпавшие сущности -> их рёбра."""
+                   include_expired: bool = False,
+                   as_of: float | None = None) -> list[Hit]:
+        """1-hop expansion: совпавшие сущности -> их рёбра (срез на as_of)."""
         if scope == "facts":
             return []
         terms = tokenize(query)
@@ -177,7 +185,7 @@ class Router:
         for ent in self.store.match_entities(terms, limit=5, owner=owner):
             for nb in self.store.neighbors(
                     ent, session_id if scope == "session" else "", owner=owner,
-                    include_expired=include_expired):
+                    include_expired=include_expired, as_of=as_of):
                 eid = nb["edge_id"]
                 if eid in seen:
                     continue

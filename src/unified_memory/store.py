@@ -523,6 +523,23 @@ class Store:
         return out
 
     @_locked
+    def window_for(self, refs: list[tuple[str, int]]
+                   ) -> dict[tuple[str, int], tuple[float, float]]:
+        """Batch окно валидности (valid_from=created_at, valid_until) фактов/рёбер."""
+        out: dict[tuple[str, int], tuple[float, float]] = {}
+        by_table: dict[str, list[int]] = {}
+        for ot, oid in refs:
+            if ot in ("um_facts", "um_edges"):
+                by_table.setdefault(ot, []).append(oid)
+        for ot, oids in by_table.items():
+            ph = ",".join("?" * len(oids))
+            for oid, ca, vu in self.conn.execute(
+                    f"SELECT id, created_at, valid_until FROM {ot}"
+                    f" WHERE id IN ({ph})", oids):
+                out[(ot, oid)] = (float(ca or 0.0), float(vu or 0.0))
+        return out
+
+    @_locked
     def row_meta(self, owner_table: str, owner_id: int) -> dict:
         """Версионные поля для mem_expand (fact/edge)."""
         if owner_table == "um_facts":
@@ -532,8 +549,10 @@ class Store:
             return {"valid_until": float(r[0]), "superseded_by": int(r[1])} if r else {}
         if owner_table == "um_edges":
             r = self.conn.execute(
-                "SELECT valid_until FROM um_edges WHERE id=?", (owner_id,)).fetchone()
-            return {"valid_until": float(r[0])} if r else {}
+                "SELECT valid_until, created_at FROM um_edges WHERE id=?",
+                (owner_id,)).fetchone()
+            # valid_from = created_at: ребро валидно с момента вставки
+            return {"valid_until": float(r[0]), "valid_from": float(r[1])} if r else {}
         return {}
 
     @_locked
@@ -619,7 +638,8 @@ class Store:
     def fts_search(self, query: str, scope: str = "all",
                    session_id: str = "", limit: int = 20,
                    owner: str = "",
-                   include_expired: bool = False) -> list[Hit]:
+                   include_expired: bool = False,
+                   as_of: float | None = None) -> list[Hit]:
         """Полнотекст: FTS5 при наличии, иначе LIKE по токенам.
 
         Trigram-FTS не ищет термы короче 3 символов («да», «он») — для таких
@@ -648,7 +668,11 @@ class Store:
             cand = [(ot, oid) for ot, oid in rows if ot in tables]
             owners = self.owners_for(cand) if owner else {}
             expired: set = set()
-            if not include_expired:
+            if as_of is not None:
+                win = self.window_for(cand)
+                expired = {k for k, (vf, vu) in win.items()
+                           if not (vf <= as_of and (vu == 0 or vu > as_of))}
+            elif not include_expired:
                 now = time.time()
                 expired = {k for k, vu in self.validity_for(cand).items()
                            if vu != 0 and vu <= now}
@@ -683,7 +707,11 @@ class Store:
                 if scope == "session":
                     cond = f"(e.session_id=?) AND ({cond})"
                     params = [session_id] + params
-                if not include_expired:
+                if as_of is not None:
+                    cond = (f"(e.created_at<=? AND (e.valid_until=0 OR e.valid_until>?))"
+                            f" AND ({cond})")
+                    params = [as_of, as_of] + params
+                elif not include_expired:
                     cond = f"(e.valid_until=0 OR e.valid_until>?) AND ({cond})"
                     params = [time.time()] + params
                 rows = self.conn.execute(
@@ -705,7 +733,11 @@ class Store:
             if ot == "um_messages" and scope == "session":
                 cond = f"(session_id=?) AND ({cond})"
                 params = [session_id] + params
-            if ot == "um_facts" and not include_expired:
+            if ot == "um_facts" and as_of is not None:
+                cond = (f"(created_at<=? AND (valid_until=0 OR valid_until>?))"
+                        f" AND ({cond})")
+                params = [as_of, as_of] + params
+            elif ot == "um_facts" and not include_expired:
                 cond = f"(valid_until=0 OR valid_until>?) AND ({cond})"
                 params = [time.time()] + params
             idcol = "id"
@@ -1129,7 +1161,9 @@ class Store:
     @_locked
     def neighbors(self, entity_name: str, session_id: str = "",
                   limit: int = 100, owner: str = "",
-                  include_expired: bool = False) -> list[dict]:
+                  include_expired: bool = False,
+                  as_of: float | None = None) -> list[dict]:
+        """as_of: срез графа на момент — valid_from(=created_at) <= as_of < valid_until."""
         key = entity_name.strip().lower()
         q = "SELECT id FROM um_entities WHERE name=?"
         params: list = [key]
@@ -1152,7 +1186,11 @@ class Store:
         if owner:
             q += " AND e.owner = ?"
             params.append(owner)
-        if not include_expired:
+        if as_of is not None:
+            # ось валидности: ребро жило в [created_at, valid_until)
+            q += " AND e.created_at <= ? AND (e.valid_until = 0 OR e.valid_until > ?)"
+            params += [as_of, as_of]
+        elif not include_expired:
             q += " AND (e.valid_until = 0 OR e.valid_until > ?)"
             params.append(time.time())
         q += " LIMIT ?"
