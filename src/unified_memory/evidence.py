@@ -1,0 +1,220 @@
+"""mem_evidence: детерминированная проверка опоры (cite) и агрегация (compute).
+
+Без LLM. Тул работает ТОЛЬКО над refs, которые передал вызывающий (никакого
+авто-поиска). NL-интент («посчитай сумму…») парсит хост-агент, тул — арифметика.
+
+cite: дословное/почти-дословное вхождение claim в тела refs → verdict.
+compute: count/sum/min/max/avg/median по числам из тел ТЕХ ЖЕ refs.
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Callable
+
+# kind из mem_recall (um_*) и короткие алиасы
+KINDS = {
+    "fact": "um_facts", "um_facts": "um_facts",
+    "message": "um_messages", "um_messages": "um_messages",
+    "summary": "um_summaries", "um_summaries": "um_summaries",
+    "edge": "um_edges", "um_edges": "um_edges",
+}
+
+_NUM = re.compile(r"-?\d[\d\u00a0 ]*(?:[.,]\d+)?")
+_WORD = re.compile(r"[0-9a-zа-яё]+")
+_OPS = ("count", "sum", "min", "max", "avg", "median")
+
+
+def parse_ref(ref: str) -> tuple[str, int]:
+    """'fact:3' | 'um_facts:3' → ('um_facts', 3). Кидает ValueError на мусор."""
+    if not isinstance(ref, str) or ":" not in ref:
+        raise ValueError(f"bad ref {ref!r}: ожидаю 'kind:id', напр. 'fact:3'")
+    kind, _, raw = ref.partition(":")
+    table = KINDS.get(kind.strip().lower())
+    if table is None:
+        raise ValueError(f"unknown ref kind {kind!r}: {sorted(set(KINDS))}")
+    try:
+        return table, int(raw.strip())
+    except ValueError:
+        raise ValueError(f"bad ref id in {ref!r}: ожидаю целое")
+
+
+def _norm(s: str) -> str:
+    return " ".join(s.split()).casefold()
+
+
+def _tokens(s: str) -> list[str]:
+    return _WORD.findall(s.casefold())
+
+
+def _tok_match(a: str, b: str) -> bool:
+    """Дешёвый prefix-stem для RU-морфологии: река≈реке, москва≈москве."""
+    if a == b:
+        return True
+    n = min(len(a), len(b))
+    if n >= 5 and a[:4] == b[:4]:
+        return True
+    if n >= 4 and a[:3] == b[:3]:
+        return True
+    return False
+
+
+def coverage(claim: str, body: str) -> tuple[float, bool]:
+    """(доля токенов claim, найденных в body; дословное вхождение).
+
+    Дословность требует контигуального вхождения нормализованного claim и
+    не срабатывает на коротком однословном claim (иначе 'да' ⊂ 'удар').
+    """
+    c = _norm(claim)
+    b = _norm(body)
+    if not c:
+        return 0.0, False
+    verbatim = False
+    if c == b:
+        verbatim = True
+    elif len(_tokens(claim)) >= 2 or len(c) >= 8:
+        verbatim = c in b
+    if verbatim:
+        return 1.0, True
+    ct = _tokens(claim)
+    if not ct:
+        return 0.0, False
+    bt = _tokens(body)
+    hit = sum(1 for t in ct if any(_tok_match(t, x) for x in bt))
+    return hit / len(ct), False
+
+
+def parse_number(raw: str) -> float | None:
+    s = raw.replace("\u00a0", "").replace(" ", "")
+    if "," in s and "." in s:
+        s = s.replace(",", "")
+    elif "," in s:
+        s = s.replace(",", ".")
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _numbers(text: str, pattern: str) -> list[float]:
+    if pattern:
+        rx = re.compile(pattern)
+        raw = [m.group(1) if m.groups() else m.group(0) for m in rx.finditer(text)]
+    else:
+        raw = _NUM.findall(text)
+    out = []
+    for r in raw:
+        v = parse_number(r)
+        if v is not None:
+            out.append(v)
+    return out
+
+
+def _resolve(store, refs, owner, max_refs, max_chars, archived_fetch):
+    """Разбор refs → resolvable тела + rejections. Возвращает (rows, rejections)."""
+    rows: list[tuple[tuple[str, int], str, bool]] = []
+    rejections: list[dict] = []
+    seen: set[tuple[str, int]] = set()
+    parsed: list[tuple[str, int]] = []
+    for ref in refs:
+        try:
+            key = parse_ref(ref)
+        except ValueError as e:
+            rejections.append({"ref": ref, "reason_code": "bad_ref",
+                               "detail": str(e)[:120]})
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        parsed.append(key)
+    if len(parsed) > max_refs:
+        for key in parsed[max_refs:]:
+            rejections.append({"kind": key[0], "id": key[1],
+                               "reason_code": "budget"})
+        parsed = parsed[:max_refs]
+    bodies = store.bodies_for(parsed)
+    owners = store.owners_for(parsed) if owner else {}
+    for key in parsed:
+        if owner and owners.get(key, "") != owner:
+            rejections.append({"kind": key[0], "id": key[1],
+                               "reason_code": "owner_mismatch"})
+            continue
+        got = bodies.get(key)
+        body = got[0] if got else None
+        if body is None:
+            rejections.append({"kind": key[0], "id": key[1],
+                               "reason_code": "not_found"})
+            continue
+        archived = False
+        if body == "[archived]":
+            body = archived_fetch(key[0], key[1]) if archived_fetch else None
+            archived = True
+            if body is None:
+                rejections.append({"kind": key[0], "id": key[1],
+                                   "reason_code": "archived"})
+                continue
+        rows.append((key, body[:max_chars], archived))
+    return rows, rejections
+
+
+def run_cite(store, claim: str, refs: list[str], owner: str = "",
+             max_refs: int = 50, max_chars: int = 8000, partial: float = 0.5,
+             archived_fetch: Callable[[str, int], str | None] | None = None) -> dict:
+    rows, rejections = _resolve(store, refs, owner, max_refs, max_chars,
+                                archived_fetch)
+    refs_out = []
+    best = "unsupported"
+    rank = {"unsupported": 0, "partial": 1, "supported": 2}
+    for key, body, archived in rows:
+        cov, verbatim = coverage(claim, body)
+        v = ("supported" if (verbatim or cov >= 1.0)
+             else "partial" if cov >= partial else "unsupported")
+        if rank[v] > rank[best]:
+            best = v
+        refs_out.append({"kind": key[0], "id": key[1], "verdict": v,
+                         "coverage": round(cov, 4), "verbatim": verbatim,
+                         "archived": archived})
+    return {"mode": "cite", "claim": claim, "verdict": best,
+            "refs": refs_out, "rejections": rejections}
+
+
+def run_compute(store, refs: list[str], op: str = "count", pattern: str = "",
+                owner: str = "", max_refs: int = 50, max_chars: int = 8000,
+                archived_fetch: Callable[[str, int], str | None] | None = None) -> dict:
+    op = (op or "").strip().lower()
+    if op not in _OPS:
+        raise ValueError(f"unknown op {op!r}: {list(_OPS)}")
+    rows, rejections = _resolve(store, refs, owner, max_refs, max_chars,
+                                archived_fetch)
+    values: list[float] = []
+    refs_out = []
+    for key, body, archived in rows:
+        nums = _numbers(body, pattern)
+        values += nums
+        refs_out.append({"kind": key[0], "id": key[1],
+                         "numbers": [round(v, 6) for v in nums],
+                         "archived": archived})
+    if op == "count":
+        return {"mode": "compute", "op": op, "result": float(len(rows)),
+                "n": len(values), "refs": refs_out, "rejections": rejections,
+                "verdict": "supported" if rows else "unsupported"}
+    if not values:
+        return {"mode": "compute", "op": op, "result": None, "n": 0,
+                "refs": refs_out,
+                "rejections": rejections + [{"reason_code": "no_numbers"}],
+                "verdict": "unsupported"}
+    if op == "sum":
+        result = sum(values)
+    elif op == "min":
+        result = min(values)
+    elif op == "max":
+        result = max(values)
+    elif op == "avg":
+        result = sum(values) / len(values)
+    else:  # median
+        s = sorted(values)
+        mid = len(s) // 2
+        result = s[mid] if len(s) % 2 else (s[mid - 1] + s[mid]) / 2
+    return {"mode": "compute", "op": op, "result": round(result, 6),
+            "n": len(values), "refs": refs_out, "rejections": rejections,
+            "verdict": "supported"}

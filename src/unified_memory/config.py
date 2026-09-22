@@ -122,6 +122,18 @@ def _default_archive_batch() -> int:
     return _strict_int("UM_ARCHIVE_BATCH", 500)
 
 
+def _default_ev_refs() -> int:
+    return _strict_int("UM_EVIDENCE_MAX_REFS", 50)
+
+
+def _default_ev_chars() -> int:
+    return _strict_int("UM_EVIDENCE_MAX_CHARS", 8000)
+
+
+def _default_ev_partial() -> float:
+    return _strict_float("UM_EVIDENCE_PARTIAL", 0.5)
+
+
 def _default_vec_index() -> str:
     v = os.environ.get("UM_VEC_INDEX", "auto").strip().lower()
     if v not in ("auto", "off"):
@@ -171,6 +183,10 @@ class Config:
     archive_size_mb: int = field(default_factory=_default_archive_mb)
     archive_path: Path = field(default_factory=_default_archive_path)
     archive_batch: int = field(default_factory=_default_archive_batch)
+    # Evidence (v0.6): бюджеты cite/compute. Без LLM.
+    evidence_max_refs: int = field(default_factory=_default_ev_refs)
+    evidence_max_chars: int = field(default_factory=_default_ev_chars)
+    evidence_partial: float = field(default_factory=_default_ev_partial)
 
     def __post_init__(self) -> None:
         if self.embedding_backend not in ("local", "openai"):
@@ -197,6 +213,12 @@ class Config:
             raise ValueError("UM_ARCHIVE_BATCH must be > 0")
         if self.archive_path == self.db_path:
             raise ValueError("UM_ARCHIVE_PATH must differ from the main DB")
+        if self.evidence_max_refs <= 0:
+            raise ValueError("UM_EVIDENCE_MAX_REFS must be > 0")
+        if self.evidence_max_chars <= 0:
+            raise ValueError("UM_EVIDENCE_MAX_CHARS must be > 0")
+        if not 0.0 < self.evidence_partial <= 1.0:
+            raise ValueError("UM_EVIDENCE_PARTIAL must be in (0, 1]")
         if self.context_tokens <= 0:
             raise ValueError("UM_CONTEXT_TOKENS must be > 0")
         if not 0.0 < self.compact_threshold <= 1.0:

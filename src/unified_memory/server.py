@@ -30,6 +30,7 @@ from unified_memory.store import Store  # noqa: E402
 from unified_memory.summarize import default_summarizer  # noqa: E402
 from unified_memory import archive  # noqa: E402
 from unified_memory.recent import parse_as_of, parse_period, parse_when  # noqa: E402
+from unified_memory.evidence import run_cite, run_compute  # noqa: E402
 
 mcp = _Server("unified-memory")
 
@@ -265,6 +266,50 @@ def mem_recent(period: str = "today", session_id: str = "",
     return json.dumps({"period": period, "window": {
         "start": window.start_ts, "end": window.end_ts}, "items": out},
         ensure_ascii=False)
+
+
+def _archive_fetch(cfg):
+    """Callback для evidence: тянет вынесенный текст сообщения из архива."""
+    if not cfg.archive_path.exists():  # чтение не должно создавать архив
+        return None
+
+    def fetch(table: str, oid: int):
+        if table != "um_messages":
+            return None
+        conn = archive.open_archive(cfg.archive_path)
+        try:
+            got = archive.fetch_message(conn, oid)
+            return got["content"] if got else None
+        finally:
+            conn.close()
+
+    return fetch
+
+
+@mcp.tool()
+def mem_evidence(claim: str = "", refs: list[str] | None = None,
+                 mode: str = "cite", op: str = "count",
+                 pattern: str = "", owner: str = "") -> str:
+    """Verify a claim against refs (mode=cite → supported|partial|unsupported)
+    or aggregate numbers over refs (mode=compute, op=count|sum|min|max|avg|median).
+    Only the refs you pass are used — no auto-search. refs like 'fact:3'."""
+    _ingest()
+    cfg = _STATE["cfg"]
+    refs = refs or []
+    if mode == "cite":
+        out = run_cite(_STATE["store"], claim, refs, owner=owner,
+                       max_refs=cfg.evidence_max_refs,
+                       max_chars=cfg.evidence_max_chars,
+                       partial=cfg.evidence_partial,
+                       archived_fetch=_archive_fetch(cfg))
+    elif mode == "compute":
+        out = run_compute(_STATE["store"], refs, op=op, pattern=pattern,
+                          owner=owner, max_refs=cfg.evidence_max_refs,
+                          max_chars=cfg.evidence_max_chars,
+                          archived_fetch=_archive_fetch(cfg))
+    else:
+        raise ValueError(f"unknown mode {mode!r}: cite | compute")
+    return json.dumps(out, ensure_ascii=False)
 
 
 @mcp.tool()
