@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import time
 
 try:
@@ -36,6 +37,7 @@ from unified_memory.evidence import (  # noqa: E402
 mcp = _Server("unified-memory")
 
 _STATE = {"ingest": None, "store": None, "cfg": None, "backend_error": None}
+_INIT_LOCK = threading.Lock()  # FastMCP гоняет sync-тулы в тредах: двойная проверка
 
 
 def _backend(cfg):
@@ -50,18 +52,20 @@ def _backend(cfg):
 def _ingest():
     """#7: ленивая инициализация. Ошибка сети/модели роняет вектора, не сервер."""
     if _STATE["ingest"] is None:
-        cfg = load()
-        try:
-            backend = _backend(cfg)
-        except Exception as e:  # noqa: BLE001 — любой сбой warm = FTS-only
-            backend = None
-            _STATE["backend_error"] = f"{type(e).__name__}: {e}"[:300]
-        store = Store(cfg,
-                      embedding_dim=backend.dim if backend else 0,
-                      embedding_model=cfg.embedding_model if backend else "")
-        _STATE.update(store=store, cfg=cfg,
-                      ingest=Ingest(store, backend, default_summarizer(), cfg))
-        _maybe_maintenance(store, cfg)  # ленивый weekly-purge + порог архива
+        with _INIT_LOCK:  # два первых вызова в тредах не должны строить Store дважды
+            if _STATE["ingest"] is None:
+                cfg = load()
+                try:
+                    backend = _backend(cfg)
+                except Exception as e:  # noqa: BLE001 — любой сбой warm = FTS-only
+                    backend = None
+                    _STATE["backend_error"] = f"{type(e).__name__}: {e}"[:300]
+                store = Store(cfg,
+                              embedding_dim=backend.dim if backend else 0,
+                              embedding_model=cfg.embedding_model if backend else "")
+                _STATE.update(store=store, cfg=cfg,
+                              ingest=Ingest(store, backend, default_summarizer(), cfg))
+                _maybe_maintenance(store, cfg)  # ленивый weekly-purge + порог архива
     return _STATE["ingest"]
 
 

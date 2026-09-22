@@ -211,10 +211,18 @@ def _tiktoken_enc():
 
 
 def estimate_tokens(text: str) -> int:
+    """Токены текста: tiktoken (если установлен), иначе RU-aware эвристика.
+
+    `len//4` занижает кириллицу ~2.3x (cl100k ≈ 1.8 симв/токен), из-за чего
+    компакшн на чистой инсталляции молча срабатывал позже. Считаем
+    ASCII/4 + не-ASCII/2. Точный cl100k — `pip install '.[tokens]'`.
+    """
     enc = _tiktoken_enc()
     if enc is not None:
         return len(enc.encode(text))
-    return max(1, len(text) // 4)
+    ascii_n = sum(1 for ch in text if ch < "\x80")
+    other = len(text) - ascii_n
+    return max(1, (ascii_n + 3) // 4 + (other + 1) // 2)
 
 
 def _locked(fn):
@@ -816,9 +824,12 @@ class Store:
         tables = tables[scope]
         if self.fts and max(len(t) for t in terms) >= 3:
             match = " OR ".join(f'"{t}"' for t in terms[:10] if len(t) >= 3)
-            q = ("SELECT owner_table, owner_id FROM um_fts WHERE um_fts MATCH ? LIMIT ?")
+            ph = ",".join("?" * len(tables))
+            q = ("SELECT owner_table, owner_id FROM um_fts"
+                 f" WHERE um_fts MATCH ? AND owner_table IN ({ph})"
+                 " ORDER BY rank LIMIT ?")
             try:
-                rows = self.conn.execute(q, (match, limit * 3)).fetchall()
+                rows = self.conn.execute(q, (match, *tables, limit * 3)).fetchall()
             except sqlite3.OperationalError:
                 rows = []
             cand = [(ot, oid) for ot, oid in rows if ot in tables]
@@ -1690,10 +1701,30 @@ class Store:
                 "fts": self.fts}
 
     @_locked
+    def _dangling_conditions(self) -> tuple[str, list]:
+        """SQL-условие «живой линк с удалённым концом» (имена таблиц — из LINK_TABLES)."""
+        conds: list = []
+        params: list = []
+        for t in LINK_TABLES:
+            conds.append(f"(src_table=? AND src_id NOT IN (SELECT id FROM {t}))")
+            params.append(t)
+            conds.append(f"(dst_table=? AND dst_id NOT IN (SELECT id FROM {t}))")
+            params.append(t)
+        return " OR ".join(conds), params
+
+    def _dangling_link_ids(self, limit: int = 0) -> list[int]:
+        where, params = self._dangling_conditions()
+        q = f"SELECT id FROM um_links WHERE valid_until=0 AND ({where})"
+        if limit:
+            q += " LIMIT ?"
+            params = [*params, limit]
+        return [r[0] for r in self.conn.execute(q, params).fetchall()]
+
     def hygiene(self) -> dict:
         """Кандидаты мусора без мутаций: сироты векторов/FTS/сущностей, висячий vec0."""
         out: dict = {"orphan_vectors": [], "orphan_fts": [],
-                     "orphan_entities": 0, "dangling_vecidx": []}
+                     "orphan_entities": 0, "dangling_vecidx": [],
+                     "dangling_links": []}
         parents = {"um_messages": "SELECT id FROM um_messages",
                    "um_summaries": "SELECT id FROM um_summaries",
                    "um_facts": "SELECT id FROM um_facts",
@@ -1726,6 +1757,7 @@ class Store:
                     out["dangling_vecidx"].append([ot, oid])
             except Exception:
                 pass
+        out["dangling_links"] = self._dangling_link_ids(limit=11)
         return out
 
     @_locked
@@ -1771,6 +1803,10 @@ class Store:
                    JOIN um_entities o ON o.id=e.object_id""")
             report["fts_rebuilt"] = True
         self._prune_orphan_entities()
+        dwhere, dparams = self._dangling_conditions()
+        cur = self.conn.execute(
+            f"DELETE FROM um_links WHERE valid_until=0 AND ({dwhere})", dparams)
+        report["purged_links"] = cur.rowcount
         if dim > 0:
             try:
                 report["vec_index"] = self.build_vec_index(dim)

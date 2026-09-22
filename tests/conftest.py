@@ -33,3 +33,13 @@ for _k in [k for k in os.environ if _is_ambient(k)]:
 def _clean_um_env(monkeypatch):
     for key in [k for k in os.environ if _is_ambient(k)]:
         monkeypatch.delenv(key, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _pin_tokenizer(monkeypatch):
+    """Детерминизм: suite всегда идёт по эвристике, независимо от наличия
+    tiktoken. Иначе счётчик компакшна зависит от окружения (внешний аудит:
+    чистая установка vs dev-машина с tiktoken давали разный результат)."""
+    import unified_memory.store as _store
+
+    monkeypatch.setattr(_store, "_TIKTOKEN", {"enc": None, "tried": True})

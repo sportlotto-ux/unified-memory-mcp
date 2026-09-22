@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "unified-memory-mcp"
-version = "0.7.1"
+version = "0.7.2"
 description = "Unified Hermes memory MCP: hermes-lcm + mnemosyne merged"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -19,6 +19,9 @@ local-embed = [
 ]
 local-vec = [
     "sqlite-vec>=0.1",
+]
+tokens = [
+    "tiktoken>=0.7",
 ]
 
 [tool.setuptools.packages.find]
