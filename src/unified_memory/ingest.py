@@ -33,30 +33,38 @@ class Ingest:
         return text
 
     def remember_message(self, session_id: str, role: str, content: str,
-                         source: str = "mcp", owner: str = "") -> dict:
+                         source: str = "mcp", owner: str = "",
+                         _commit: bool = True) -> dict:
         if not (content or "").strip():
             raise ValueError("empty content: nothing to remember")
         content = self._clean(content)
-        mid = self.store.add_message(session_id, role, content, source, owner)
+        mid = self.store.add_message(session_id, role, content, source, owner,
+                                     _commit=_commit)
         if self.backend is not None:
             self.store.add_vector("um_messages", mid,
                                   self.backend.embed_docs([content])[0],
-                                  self.backend.model_name, owner)
-        return {"id": mid,
-                "compaction": self.window.maybe_compact(session_id, owner)}
+                                  self.backend.model_name, owner, _commit=_commit)
+        # В batch (_commit=False) компакшн откладывается и делается один раз в конце
+        # (guardrail 3): иначе N прогонов по частичному состоянию батча.
+        compaction = (self.window.maybe_compact(session_id, owner)
+                      if _commit else {"status": "deferred"})
+        return {"id": mid, "compaction": compaction}
 
     def remember_fact(self, category: str, name: str, body: str,
                       importance: float = 0.5, subject: str = "",
                       predicate: str = "", obj: str = "",
-                      session_id: str = "", owner: str = "") -> int:
+                      session_id: str = "", owner: str = "",
+                      _commit: bool = True) -> int:
         """Слот-запись факта. Возвращает id живого факта (совместимость)."""
         return self.upsert_fact(category, name, body, importance, subject,
-                                predicate, obj, session_id, owner)["id"]
+                                predicate, obj, session_id, owner,
+                                _commit=_commit)["id"]
 
     def upsert_fact(self, category: str, name: str, body: str,
                     importance: float = 0.5, subject: str = "",
                     predicate: str = "", obj: str = "",
-                    session_id: str = "", owner: str = "") -> dict:
+                    session_id: str = "", owner: str = "",
+                    _commit: bool = True) -> dict:
         """Слот-запись + вектора/рёбра. Возвращает {id, status, superseded_id}.
 
         status: created | superseded (новое тело) | noop (то же тело) |
@@ -65,30 +73,31 @@ class Ingest:
         """
         name, body = self._clean(name), self._clean(body)
         subject, predicate, obj = (self._clean(s) for s in (subject, predicate, obj))
-        out = self.store.add_fact_ex(category, name, body, importance, owner)
+        out = self.store.add_fact_ex(category, name, body, importance, owner,
+                                     _commit=_commit)
         fid = out["id"]
         if out["status"] in ("noop", "updated"):
             return out
         if self.backend is not None:
             self.store.add_vector("um_facts", fid,
                                   self.backend.embed_docs([f"{name} {body}"])[0],
-                                  self.backend.model_name, owner)
+                                  self.backend.model_name, owner, _commit=_commit)
         if subject and predicate and obj:
             eid = self.store.add_edge(subject, predicate, obj, session_id,
-                                      fact_id=fid, owner=owner)
+                                      fact_id=fid, owner=owner, _commit=_commit)
             if self.backend is not None:
                 self.store.add_vector(
                     "um_edges", eid,
                     self.backend.embed_docs([f"{subject} {predicate} {obj}"])[0],
-                    self.backend.model_name, owner)
+                    self.backend.model_name, owner, _commit=_commit)
                 for ent in (subject, obj):
-                    ent_id = self.store.add_entity(ent, owner)
+                    ent_id = self.store.add_entity(ent, owner, _commit=_commit)
                     if self.store.has_vector("um_entities", ent_id):
                         continue  # имя то же — вектор тот же, CPU не жжём
                     self.store.add_vector(
                         "um_entities", ent_id,
                         self.backend.embed_docs([ent])[0],
-                        self.backend.model_name, owner)
+                        self.backend.model_name, owner, _commit=_commit)
         return out
 
     def compact_session(self, session_id: str, keep_tail: int = 20,

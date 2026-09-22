@@ -387,17 +387,26 @@ class Store:
     def transaction(self, dry_run: bool = False):
         """Одношовный batch-контур: RELEASE коммитит, dry_run/ошибка — ROLLBACK.
         Внутренние write-методы вызываются с _commit=False (иначе commit внутри
-        разрывает контур: это и есть критический guardrail п.5)."""
+        разрывает контур: это и есть критический guardrail п.5).
+
+        Push в _sp_stack обязателен: без него _abort() внутри батча ушёл бы в
+        голый conn.rollback(), откатил весь батч, а последующий RELEASE закоммитил
+        бы частичный прогресс как успех (P1a)."""
         name = "um_batch"
-        self.conn.execute(f"SAVEPOINT {name}")
-        ok = False
-        try:
-            yield
-            ok = True
-        finally:
-            if dry_run or not ok:
-                self.conn.execute(f"ROLLBACK TO SAVEPOINT {name}")
-            self.conn.execute(f"RELEASE SAVEPOINT {name}")
+        with self._lock:  # P2: весь контур под одним RLock (single-writer)
+            if name in self._sp_stack:
+                raise ValueError("nested transaction() is not supported")
+            self.conn.execute(f"SAVEPOINT {name}")
+            self._sp_stack.append(name)
+            ok = False
+            try:
+                yield
+                ok = True
+            finally:
+                if dry_run or not ok:
+                    self.conn.execute(f"ROLLBACK TO SAVEPOINT {name}")
+                self.conn.execute(f"RELEASE SAVEPOINT {name}")
+                self._sp_stack.pop()
 
     @_locked
     def bump_tokens(self, session_id: str, delta: int, owner: str = "",
@@ -696,7 +705,8 @@ class Store:
 
     @_locked
     def add_vector(self, owner_table: str, owner_id: int,
-                   vec: list[float], model: str, owner: str = "") -> None:
+                   vec: list[float], model: str, owner: str = "",
+                   _commit: bool = True) -> None:
         # Replace-семантика (#5): повторный embed того же owner не плодит дубли.
         self.conn.execute(
             "DELETE FROM um_vectors WHERE owner_table=? AND owner_id=?",
@@ -721,7 +731,7 @@ class Store:
                 # индекс битый (снесли таблицу вручную) — размечаем как потерянный,
                 # источник правды um_vectors цел, пересборка через reindex
                 self.conn.execute("DELETE FROM um_meta WHERE key='vec_index_dim'")
-        self.conn.commit()
+        self._commit_if(_commit)
 
     @_locked
     def _fts_index(self, owner_table: str, owner_id: int, body: str) -> None:

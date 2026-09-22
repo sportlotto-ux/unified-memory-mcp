@@ -8,14 +8,21 @@ import sqlite3
 
 import pytest
 
+from fake_backend import FakeBackend
 from unified_memory.config import Config
+from unified_memory.ingest import Ingest
 from unified_memory.store import Store
 
 
 @pytest.fixture
-def store(tmp_path):
-    s = Store(Config(db_path=tmp_path / "d.db", archive_path=tmp_path / "a.db",
-                     context_tokens=10**9))
+def cfg(tmp_path):
+    return Config(db_path=tmp_path / "d.db", archive_path=tmp_path / "a.db",
+                  context_tokens=10**9)
+
+
+@pytest.fixture
+def store(cfg):
+    s = Store(cfg)
     yield s
     s.close()
 
@@ -89,3 +96,42 @@ def test_nested_savepoints_reentrant(store):
             with store.savepoint():
                 store.add_fact("a", "y", "2", _commit=False)
     assert _n(store, "um_facts") == 2
+
+
+def test_nested_transaction_rejected(store):
+    with pytest.raises(ValueError, match="nested transaction"):
+        with store.transaction():
+            with store.transaction():
+                pass
+
+
+_TABLES = ("um_messages", "um_facts", "um_vectors", "um_edges",
+           "um_entities", "um_fts")
+
+
+def _counts(st):
+    return {t: _n(st, t) for t in _TABLES}
+
+
+# P1b: backend + триплет внутри батча не должны давать мид-коммитов.
+def test_batch_backend_triple_rollback_is_atomic(store, cfg):
+    ing = Ingest(store, FakeBackend(), None, cfg)
+    before = _counts(store)
+    with pytest.raises(RuntimeError):
+        with store.transaction():
+            ing.upsert_fact("skill", "k", "b1", subject="a", predicate="p",
+                            obj="b", _commit=False)
+            ing.remember_message("s", "user", "hello", _commit=False)
+            raise RuntimeError("boom")
+    assert _counts(store) == before  # ни одного мид-коммита
+
+
+def test_batch_backend_triple_commits(store, cfg):
+    ing = Ingest(store, FakeBackend(), None, cfg)
+    with store.transaction():
+        ing.upsert_fact("skill", "k", "b1", subject="a", predicate="p",
+                        obj="b", _commit=False)
+        ing.remember_message("s", "user", "hello", _commit=False)
+    assert _n(store, "um_facts") == 1
+    assert _n(store, "um_edges") == 1
+    assert _n(store, "um_vectors") >= 4  # fact + edge + 2 entity + message
