@@ -28,10 +28,20 @@
 (история остаётся в теле, recall истёкшего всё равно через `include_expired`
 идёт по тексту, не по вектору). Согласовать с P3.4.
 
+## P3.5 — нет cron-режима для age-based retention (а)
+`mem_doctor` знает только `check/clean/repair/archive/purge`; режима `mode=retention`
+**не существует** (в `docs/V0.5_PLAN.md` он упоминался как желаемый — не реализован).
+`mode=archive` двигает oldest-батч **безусловно** (поведение (б), по размеру) и
+`UM_RETENTION_DAYS` игнорирует. Итог: если хост хочет гарантированный age-based
+проход (а) по расписанию, а не «когда ленивый планировщик проснётся на первом
+туле» — такой команды нет. TODO: `mode=retention` с
+`before_ts = now - retention_days * 86400`, тогда cron честно воспроизведёт (а).
+
 ## Прочее, подтверждённое как «по решению» (не чинить)
 - Изоляция `owner=""` добровольная (legacy видит всё) — контракт, зафиксирован
   `test_legacy_migration`.
-- Lazy-maintenance на read-path — осознанный компромисс для stdio; хост может
-  дёргать `mem_doctor(mode=retention)` из cron.
+- Lazy-maintenance на read-path — осознанный компромисс для stdio (демона нет).
+  Cron-аналог неполный: `mem_doctor(mode=archive, apply=true)` — это (б),
+  не age-based (а); см. P3.5.
 - `as_of` = конец суток vs `valid_until` = начало суток — асимметрия
   задокументирована в README.

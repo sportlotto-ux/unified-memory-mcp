@@ -72,7 +72,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 | `mem_fact` | Слот-факт (одно живое значение на `owner/category/name`) + опциональный триплет графа; то же тело — no-op, новое — supersede с историей |
 | `mem_update` | Правка факта по id (новая версия, history живёт) или истечение/reopen факта/ребра (`valid_until`) |
 | `mem_recall` | Единый поиск: FTS + вектора + граф (1-hop) + RRF. `scope`: `all`/`session`/`facts`; `as_of` — срез графа на дату; `include_expired` — история |
-| `mem_recent` | Temporal: что было в UTC-окне (`today`/`week`/`Nd`/`date:`/`last Nh`) |
+| `mem_recent` | Temporal: что было в UTC-окне (`today`/`yesterday`/`week`/`month`/`Nd`/`date:`/`last Nh`) |
 | `mem_expand` | Дословно по `kind`+`id`, единая схема `{kind,id,body}` |
 | `mem_evidence` | Проверка опоры на refs: `cite` (дословно/почти → supported/partial/unsupported), `compute` (агрегация чисел над refs: count/sum/min/max/avg/median), `conflicts` (кандидаты противоречий без вердикта, `needs_judgment`). Без LLM, только переданные refs |
 | `mem_reindex` | Доложит недостающие вектора (лестница после смены модели) |
@@ -84,7 +84,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 
 ## Как это работает
 
-- **Хранение:** одна SQLite (WAL): `um_messages` + `um_summaries` (DAG) + `um_facts` + `um_entities`/`um_edges` (граф) + `um_vectors` + `um_meta`.
+- **Хранение:** одна SQLite (WAL): `um_messages` + `um_summaries` (DAG) + `um_facts` + `um_entities`/`um_edges` (граф) + `um_vectors` + `um_fts` (FTS5) + `um_meta`.
 - **Эмбеддинги:** два бэкенда. `local` (дефолт репо) — fastembed, модель `paraphrase-multilingual-mpnet-base-v2` (768, не дистиллят); для лёгких стендов MiniLM-L12 через `UM_EMBEDDING_MODEL`. `openai` — OpenAI-протокол `/v1/embeddings` поверх stdlib (ноль зависимостей): так подключается локальный model2vec-сервер Hermes (`UM_EMBEDDING_BASE_URL`, дефолт `http://127.0.0.1:8127`, potion = 256 dim, авто-детект). Держи сервер uncapped — static-модели молча режут после 512 токенов при выставленном `EMBED_MAX_TOKENS`.
 - **Поиск:** FTS5 (fallback LIKE) + cosine по векторам + RRF, поверх — recency-приор (`UM_RECENCY_HALFLIFE_DAYS`, дефолт 30, 0=off), scope-bias текущей сессии (`UM_SCOPE_BIAS`, дефолт 0.15) и MMR-диверсификация по Жаккару (`UM_MMR_LAMBDA`, дефолт 0.7, 1=off). При `pip install -e .[local-vec]` + `mem_reindex` — vec0-индекс (KNN-кандидаты + точный косинусный перескоринг, паритет с brute force пробами); без индекса — честный фулскан. Без fastembed — честный FTS-режим, `mem_status` так и скажет (`vectors_enabled: false`), молчаливого «вроде ищет» нет.
 - **Сжатие:** давление = токены сессии vs `UM_CONTEXT_TOKENS × UM_COMPACT_THRESHOLD` (дефолт 200k × 0.35, как LCM). Накрыло → старые (всё кроме `UM_FRESH_TAIL_COUNT` свежих) в summary depth 0; каждые `UM_DAG_FANIN` нод уровня схлопываются в уровень выше. Frontier в `um_meta` — каждое сообщение жмётся один раз. `mem_assemble` собирает bounded контекст под бюджет.
@@ -99,6 +99,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 | Переменная | Дефолт | Назначение |
 |---|---|---|
 | `UM_DATABASE_PATH` | `~/.hermes/unified_memory.db` | Путь к БД |
+| `HERMES_HOME` | `~/.hermes` | База для дефолтных путей (`~/.hermes/*`) |
 | `UM_EMBEDDING_MODEL` | `paraphrase-multilingual-mpnet-base-v2` (768) | local: модель fastembed строго из реестра; openai: passthrough-имя |
 | `UM_EMBEDDING_BACKEND` | `local` | `local` (fastembed) \| `openai` (8127/любой OpenAI-совместимый) |
 | `UM_EMBEDDING_BASE_URL` | `http://127.0.0.1:8127` | База для backend=openai |
@@ -122,9 +123,11 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 | `UM_DAG_FANIN` | `5` | Нод уровня → одна выше |
 | `UM_ASSEMBLY_BUDGET` | `8000` | Токенов в `mem_assemble` по дефолту |
 
-## Известные ограничения (v0.5)
+## Известные ограничения (v0.6)
 
-- Архив пока выносит **сообщения** (текст+вектор) — основной драйвер роста. Вынос истёкших фактов/рёбер и `um_summaries` — TODO; в плане.
+Полный список отложенного — `docs/BACKLOG.md`.
+
+- Архив пока выносит **сообщения** (текст+вектор) — основной драйвер роста. Вынос истёкших фактов/рёбер и `um_summaries` — TODO; в плане (`docs/BACKLOG.md`).
 
 - Isolation: `owner=""` (дефолт) — legacy без фильтра, видит всё; непустой owner — строгая изоляция во всех тулах. Старые БД мигрируют сами (owner=''), сущности пересобираются под UNIQUE(name, owner).
 - Redaction forward-only: сторa, созданные до v0.4, могут содержать секреты — чистить руками + reindex.
@@ -135,7 +138,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 ## Разработка
 
 ```bash
-python -m pytest tests/ -q   # 142 passed, 4 skipped без fastembed/vec; UM_LIVE_OPENAI=1 — live против 8127
+python -m pytest tests/ -q   # 175 passed, 4 skipped без fastembed/vec; UM_LIVE_OPENAI=1 — live против 8127
 ```
 
 Прогон герметичен: `tests/conftest.py` снимает ambient `UM_*` (иначе шелл с
