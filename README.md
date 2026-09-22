@@ -71,7 +71,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 | `mem_remember` | Сохранить сообщение; авто-компакшн при превышении порога давления |
 | `mem_fact` | Слот-факт (одно живое значение на `owner/category/name`) + опциональный триплет графа; то же тело — no-op, новое — supersede с историей |
 | `mem_link` | Типизированная связь (`src`/`dst` как `fact:3`/`message:12`, `rel` ∈ `supports`/`contradicts`/`supersedes`/`derives_from`). Оба конца обязаны существовать и принадлежать `owner`; повтор живой связи — no-op с тем же id |
-| `mem_update` | Правка факта по id (новая версия, history живёт) или истечение/reopen факта/ребра (`valid_until`) |
+| `mem_update` | Правка факта по id (новая версия, history живёт) или истечение/reopen факта/ребра/связи (`valid_until`) |
 | `mem_recall` | Единый поиск: FTS + вектора + граф (1-hop) + RRF. `scope`: `all`/`session`/`facts`; `as_of` — срез графа на дату; `include_expired` — история |
 | `mem_recent` | Temporal: что было в UTC-окне (`today`/`yesterday`/`week`/`month`/`Nd`/`date:`/`last Nh`) |
 | `mem_expand` | Дословно по `kind`+`id`, единая схема `{kind,id,body}` |
@@ -79,7 +79,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 | `mem_reindex` | Доложит недостающие вектора (лестница после смены модели) |
 | `mem_compact` | Ручное сжатие старых сообщений (сырьё остаётся) |
 | `mem_assemble` | Bounded активный контекст: summaries + свежий хвост в бюджет токенов |
-| `mem_forget` | Удаление по `kind`: `fact`/`edge` (id) или `entity` (имя), каскадом |
+| `mem_forget` | Удаление по `kind`: `fact`/`edge`/`link` (id) или `entity` (имя), каскадом |
 | `mem_status` | Счётчики + флаги деградации (`vectors_enabled`, `summarizer`, `fts`) |
 | `mem_doctor` | `integrity_check`, вектора по моделям, hygiene; режимы `clean`/`repair` (backup-first) и `archive`/`purge` (только с `apply=true`) |
 

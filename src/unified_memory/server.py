@@ -206,10 +206,10 @@ def mem_expand(kind: str, id: int, owner: str = "") -> str:
 def mem_update(kind: str = "fact", id: int = 0, body: str = "",
                importance: float = -1.0, valid_until: str = "",
                owner: str = "") -> str:
-    """Edit a fact by id (new version, keeps history) or expire/reopen fact|edge.
+    """Edit a fact by id (new version, keeps history) or expire/reopen fact|edge|link.
     valid_until: "" = unchanged, "open" = reopen (0), "now" | ISO-date | epoch = expire."""
     store = _store()
-    vu = parse_when(valid_until) if kind in ("fact", "edge") else None
+    vu = parse_when(valid_until) if kind in ("fact", "edge", "link") else None
     if kind == "fact":
         out = store.update_fact(
             int(id), body=body or None,
@@ -224,7 +224,13 @@ def mem_update(kind: str = "fact", id: int = 0, body: str = "",
         ok = store.update_edge(int(id), vu, owner)
         return json.dumps({"id": int(id), "updated": ok,
                            "status": "reopened" if vu == 0 else "expired"})
-    raise ValueError(f"unknown kind {kind!r}: fact | edge")
+    if kind == "link":
+        if vu is None:
+            raise ValueError("kind='link' needs valid_until ('open' or a date)")
+        ok = store.update_link(int(id), vu, owner)
+        return json.dumps({"id": int(id), "updated": ok,
+                           "status": "reopened" if vu == 0 else "expired"})
+    raise ValueError(f"unknown kind {kind!r}: fact | edge | link")
 
 
 @mcp.tool()
@@ -243,20 +249,22 @@ def mem_assemble(session_id: str, budget: int = 0, owner: str = "") -> str:
 
 @mcp.tool()
 def mem_forget(id: str = "", kind: str = "fact", owner: str = "") -> str:
-    """Delete by kind: fact (numeric id), edge (numeric id), entity (name)."""
-    if kind in ("fact", "edge"):
+    """Delete by kind: fact (numeric id), edge (numeric id), link (numeric id), entity (name)."""
+    if kind in ("fact", "edge", "link"):
         try:
             oid = int(id)
         except (TypeError, ValueError):
             raise ValueError(f"kind={kind!r} needs a numeric id, got {id!r}")
         if kind == "fact":
             return json.dumps({"deleted": _store().delete_fact(oid, owner)})
-        return json.dumps({"deleted": _store().delete_edge(oid, owner)})
+        if kind == "edge":
+            return json.dumps({"deleted": _store().delete_edge(oid, owner)})
+        return json.dumps({"deleted": _store().delete_link(oid, owner)})
     if kind == "entity":
         if not (id or "").strip():
             raise ValueError("kind='entity' needs a name")
         return json.dumps({"deleted": _store().delete_entity(id, owner)})
-    raise ValueError(f"unknown kind {kind!r}: fact | edge | entity")
+    raise ValueError(f"unknown kind {kind!r}: fact | edge | link | entity")
 
 
 @mcp.tool()

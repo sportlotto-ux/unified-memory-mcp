@@ -148,3 +148,60 @@ def test_server_mem_link_wiring(srv):
     assert json.loads(srv.mem_link(f"fact:{a}", f"fact:{b}", "derives_from"))["created"] is False
     with pytest.raises(ValueError):
         srv.mem_link("nope:1", f"fact:{b}", "supports")  # мусорный kind в ref
+
+
+# ---------- п.3 lifecycle (expire/reopen/hard delete) ----------
+
+def test_link_self_rejected(store):
+    fid, _ = _seed(store)
+    with pytest.raises(ValueError, match="self-link"):
+        store.link("um_facts", fid, "um_facts", fid, "supports")
+
+
+def test_delete_link_hard(store):
+    fid, mid = _seed(store)
+    lid = store.link("um_facts", fid, "um_messages", mid, "supports")["id"]
+    assert store.delete_link(lid) is True
+    assert store.conn.execute(
+        "SELECT count(*) FROM um_links WHERE id=?", (lid,)).fetchone()[0] == 0
+    assert store.delete_link(lid) is False  # уже нет
+    store.link("um_facts", fid, "um_messages", mid, "supports")  # после удаления можно снова
+
+
+def test_update_link_expire_and_reopen(store):
+    fid, mid = _seed(store)
+    lid = store.link("um_facts", fid, "um_messages", mid, "supports")["id"]
+    assert store.update_link(lid, 100.0) is True
+    vu = store.conn.execute(
+        "SELECT valid_until FROM um_links WHERE id=?", (lid,)).fetchone()[0]
+    assert vu == 100.0
+    assert store.update_link(lid, 0.0) is True  # reopen
+    vu = store.conn.execute(
+        "SELECT valid_until FROM um_links WHERE id=?", (lid,)).fetchone()[0]
+    assert vu == 0.0
+    assert store.update_link(999, 0.0) is False  # нет такой
+
+
+def test_link_lifecycle_owner_guard(store):
+    fid, mid = _seed(store, owner="tenant-a")
+    lid = store.link("um_facts", fid, "um_messages", mid, "supports",
+                     owner="tenant-a")["id"]
+    assert store.delete_link(lid, owner="tenant-b") is False   # чужой не удалит
+    assert store.update_link(lid, 100.0, owner="tenant-b") is False
+    assert store.conn.execute(
+        "SELECT count(*) FROM um_links WHERE id=?", (lid,)).fetchone()[0] == 1
+    assert store.delete_link(lid, owner="tenant-a") is True
+
+
+def test_server_mem_link_lifecycle(srv):
+    import json
+    a = json.loads(srv.mem_fact("pref", "a", "первый"))["id"]
+    b = json.loads(srv.mem_fact("pref", "b", "второй"))["id"]
+    lid = json.loads(srv.mem_link(f"fact:{a}", f"fact:{b}", "supersedes"))["id"]
+    assert json.loads(srv.mem_update(kind="link", id=lid, valid_until="now"))["status"] == "expired"
+    assert json.loads(srv.mem_update(kind="link", id=lid, valid_until="open"))["status"] == "reopened"
+    assert json.loads(srv.mem_forget(id=str(lid), kind="link"))["deleted"] is True
+    with pytest.raises(ValueError, match="valid_until"):
+        srv.mem_update(kind="link", id=lid)  # link без valid_until — отказ
+    with pytest.raises(ValueError, match="unknown kind"):
+        srv.mem_forget(id="1", kind="linkz")

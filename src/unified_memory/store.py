@@ -1314,6 +1314,8 @@ class Store:
             raise ValueError(f"unknown rel {rel!r}: {list(LINK_RELS)}")
         if weight < 0:
             raise ValueError("weight must be >= 0")
+        if src_table == dst_table and src_id == dst_id:
+            raise ValueError("self-link is not allowed (src == dst)")
         for tbl, oid in ((src_table, src_id), (dst_table, dst_id)):
             row = self.conn.execute(
                 f"SELECT owner FROM {tbl} WHERE id=?", (oid,)).fetchone()
@@ -1348,6 +1350,34 @@ class Store:
                     "src": f"{src_table}:{src_id}", "dst": f"{dst_table}:{dst_id}"}
         return {"id": lid, "created": True, "rel": rel,
                 "src": f"{src_table}:{src_id}", "dst": f"{dst_table}:{dst_id}"}
+
+    @_locked
+    def update_link(self, lid: int, valid_until: float, owner: str = "") -> bool:
+        """Истечение/reopen связи (зеркало update_edge, ADR-001 D6).
+        Замена связи = новая связь; rel не редактируется."""
+        row = self.conn.execute(
+            "SELECT owner FROM um_links WHERE id=?", (lid,)).fetchone()
+        if not row:
+            return False
+        if owner and (row[0] or "") != owner:
+            return False
+        self.conn.execute("UPDATE um_links SET valid_until=? WHERE id=?",
+                          (float(valid_until), lid))
+        self.conn.commit()
+        return True
+
+    @_locked
+    def delete_link(self, lid: int, owner: str = "") -> bool:
+        """Жёсткое удаление связи (симметрично GDPR-hatch фактов/рёбер)."""
+        row = self.conn.execute(
+            "SELECT owner FROM um_links WHERE id=?", (lid,)).fetchone()
+        if not row:
+            return False
+        if owner and (row[0] or "") != owner:
+            return False
+        self.conn.execute("DELETE FROM um_links WHERE id=?", (lid,))
+        self.conn.commit()
+        return True
 
     @_locked
     def neighbors(self, entity_name: str, session_id: str = "",
