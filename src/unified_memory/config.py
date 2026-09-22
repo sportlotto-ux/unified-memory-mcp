@@ -146,6 +146,14 @@ def _default_graph_decay() -> float:
     return _strict_float("UM_GRAPH_DECAY", 0.5)
 
 
+def _default_batch_max_ops() -> int:
+    return _strict_int("UM_BATCH_MAX_OPS", 100)
+
+
+def _default_batch_max_chars() -> int:
+    return _strict_int("UM_BATCH_MAX_CHARS", 200000)
+
+
 def _default_vec_index() -> str:
     v = os.environ.get("UM_VEC_INDEX", "auto").strip().lower()
     if v not in ("auto", "off"):
@@ -203,6 +211,9 @@ class Config:
     recall_max_hops: int = field(default_factory=_default_max_hops)
     link_fanout: int = field(default_factory=_default_link_fanout)
     graph_decay: float = field(default_factory=_default_graph_decay)
+    # v0.7-п.5b: капы mem_batch (валидируются ДО открытия контура).
+    batch_max_ops: int = field(default_factory=_default_batch_max_ops)
+    batch_max_chars: int = field(default_factory=_default_batch_max_chars)
 
     def __post_init__(self) -> None:
         if self.embedding_backend not in ("local", "openai"):
@@ -241,6 +252,10 @@ class Config:
             raise ValueError("UM_LINK_FANOUT must be >= 1")
         if not 0.0 < self.graph_decay <= 1.0:
             raise ValueError("UM_GRAPH_DECAY must be in (0, 1]")
+        if self.batch_max_ops <= 0:
+            raise ValueError("UM_BATCH_MAX_OPS must be > 0")
+        if self.batch_max_chars <= 0:
+            raise ValueError("UM_BATCH_MAX_CHARS must be > 0")
         if self.context_tokens <= 0:
             raise ValueError("UM_CONTEXT_TOKENS must be > 0")
         if not 0.0 < self.compact_threshold <= 1.0:

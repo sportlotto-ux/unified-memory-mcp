@@ -352,6 +352,33 @@ def mem_evidence(claim: str = "", refs: list[str] | None = None,
 
 
 @mcp.tool()
+def mem_batch(ops: list[dict] | None = None, dry_run: bool = False,
+              owner: str = "") -> str:
+    """Atomic batch of writes (all-or-nothing). ops: list of
+    {"op":"remember_fact", category, name, body, importance?, subject?, predicate?, object?, session_id?}
+    | {"op":"update", kind:"fact|edge|link", id, body?, importance?, valid_until?}
+    | {"op":"forget", kind:"fact|edge|link", id}.
+    dry_run=true validates then rolls back (applied=false). No cross-refs: ids from
+    one op can't be used by another. Caps UM_BATCH_MAX_OPS / UM_BATCH_MAX_CHARS are
+    checked before the transaction opens."""
+    ing = _ingest()
+    cfg = _STATE["cfg"]
+    ops = ops or []
+    if not ops:
+        raise ValueError("ops must be a non-empty list")
+    if len(ops) > cfg.batch_max_ops:
+        raise ValueError(
+            f"len(ops)={len(ops)} exceeds UM_BATCH_MAX_OPS={cfg.batch_max_ops}")
+    payload = len(json.dumps(ops, ensure_ascii=False))
+    if payload > cfg.batch_max_chars:
+        raise ValueError(
+            f"ops payload {payload} chars exceeds "
+            f"UM_BATCH_MAX_CHARS={cfg.batch_max_chars}")
+    return json.dumps(ing.batch(ops, dry_run=dry_run, owner=owner),
+                      ensure_ascii=False)
+
+
+@mcp.tool()
 def mem_status() -> str:
     """Store stats and degradation flags."""
     ing = _ingest()

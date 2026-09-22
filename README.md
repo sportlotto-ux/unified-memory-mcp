@@ -64,13 +64,14 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 }
 ```
 
-## Тулы (14)
+## Тулы (15)
 
 | Тул | Что делает |
 |---|---|
 | `mem_remember` | Сохранить сообщение; авто-компакшн при превышении порога давления |
 | `mem_fact` | Слот-факт (одно живое значение на `owner/category/name`) + опциональный триплет графа; то же тело — no-op, новое — supersede с историей |
 | `mem_link` | Типизированная связь (`src`/`dst` как `fact:3`/`message:12`, `rel` ∈ `supports`/`contradicts`/`supersedes`/`derives_from`). Оба конца обязаны существовать и принадлежать `owner`; повтор живой связи — no-op с тем же id |
+| `mem_batch` | Атомарный батч записей (all-or-nothing): ops `remember_fact` \| `update` (fact/edge/link) \| `forget` (fact/edge/link). `dry_run=true` — валидация с откатом. Без кросс-ссылок; каждый op в savepoint; текст идёт через redaction-гейт |
 | `mem_update` | Правка факта по id (новая версия, history живёт) или истечение/reopen факта/ребра/связи (`valid_until`) |
 | `mem_recall` | Единый поиск: FTS + вектора + граф + RRF. `scope`: `all`/`session`/`facts`; `as_of` — срез графа на дату; `include_expired` — история; `hops>1` — BFS-обход типизированных связей и entity-графа, `rel` фильтрует связи (`supports`/`contradicts`/`supersedes`/`derives_from`; на рёбрах — `predicate`) |
 | `mem_recent` | Temporal: что было в UTC-окне (`today`/`yesterday`/`week`/`month`/`Nd`/`date:`/`last Nh`) |
@@ -117,6 +118,8 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 | `UM_RECALL_MAX_HOPS` | `3` | `mem_recall(hops)`: потолок BFS-обхода связей (выше — ошибка) |
 | `UM_LINK_FANOUT` | `20` | `mem_recall(hops>1)`: максимум связей с узла на направление |
 | `UM_GRAPH_DECAY` | `0.5` | `mem_recall(hops>1)`: множитель score на глубину (`depth-1`) |
+| `UM_BATCH_MAX_OPS` | `100` | `mem_batch`: потолок числа ops (проверка до открытия транзакции) |
+| `UM_BATCH_MAX_CHARS` | `200000` | `mem_batch`: потолок суммарного payload ops |
 | `UM_REDACT_ENABLED` | `true` | Гейт секретов на входе (дефолт ON — продукт публичный) |
 | `UM_REDACT_PATTERNS` | `api_key,bearer_token,password_assignment,private_key` | Подмножество каталога через запятую |
 | `UM_SUMMARIZER_URL` / `UM_SUMMARIZER_MODEL` | — | LLM-пересказ; без них extractive |
@@ -136,6 +139,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 - Redaction forward-only: сторa, созданные до v0.4, могут содержать секреты — чистить руками + reindex.
 - Смена embedding-модели требует reindex (падает громко, `DimensionMismatchError`): ранние сторa на MiniLM-384 с дефолтом mpnet-768 несовместимы — пересоздайте БД или задайте `UM_EMBEDDING_MODEL` явно.
 - Нет cron-режима для age-based retention (а): `mem_doctor(mode=retention)` не существует, а `mode=archive` игнорирует `UM_RETENTION_DAYS` — см. `docs/BACKLOG.md` (P3.5).
+- Новая версия факта (`mem_update` со сменой тела и `mem_batch` `update` с `body`) создаётся **без вектора** до следующего `mem_reindex` — наследованное поведение одиночного `mem_update`, не регрессия батча.
 
 ## Разработка
 

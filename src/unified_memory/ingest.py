@@ -100,8 +100,96 @@ class Ingest:
                         self.backend.model_name, owner, _commit=_commit)
         return out
 
-    def compact_session(self, session_id: str, keep_tail: int = 20,
-                        max_sentences: int = 8, owner: str = "") -> dict:
+    def batch(self, ops: list[dict], dry_run: bool = False,
+              owner: str = "") -> dict:
+        """Атомарный батч записей (v0.7-п.5b). Все op в одном контуре; ошибка
+        любого → откат всего. Без кросс-ссылок (id op недоступен другому op).
+
+        Каждый op обёрнут в savepoint (инвариант п.5). Компакшн — один раз после
+        успешного коммита, ноль при dry-run/rollback.
+        """
+        results: list[dict] = []
+        sessions: set[str] = set()
+        error: dict | None = None
+        ok = False
+        try:
+            with self.store.transaction(dry_run=dry_run):
+                for i, op in enumerate(ops):
+                    with self.store.savepoint():
+                        res, sess = self._batch_op(i, op, owner)
+                    results.append(res)
+                    if sess:
+                        sessions.add(sess)
+                ok = True
+        except Exception as e:  # noqa: BLE001 — контур уже откатил всё
+            error = {"index": len(results),
+                     "message": f"{type(e).__name__}: {str(e)[:200]}"}
+        compactions = []
+        if ok and not dry_run:
+            for s in sorted(sessions):
+                compactions.append({"session_id": s,
+                                    "compaction": self.window.maybe_compact(s, owner)})
+        return {"ok": ok, "applied": ok and not dry_run, "dry_run": dry_run,
+                "results": results, "error": error, "compactions": compactions}
+
+    def _batch_op(self, i: int, op: dict, owner: str) -> tuple[dict, str | None]:
+        """Один op батча. Текст — через _clean (redaction-гейт, guardrail п.5)."""
+        from .recent import parse_when
+        kind = str(op.get("op") or "").strip()
+        if kind == "remember_fact":
+            out = self.upsert_fact(
+                self._clean(str(op.get("category", ""))),
+                self._clean(str(op.get("name", ""))),
+                self._clean(str(op.get("body", ""))),
+                float(op.get("importance", 0.5)),
+                self._clean(str(op.get("subject", ""))),
+                self._clean(str(op.get("predicate", ""))),
+                self._clean(str(op.get("object", ""))),
+                str(op.get("session_id", "")), owner, _commit=False)
+            return {"index": i, "op": kind, "status": out["status"],
+                    "id": out["id"], "superseded_id": out["superseded_id"]}, None
+        if kind == "update":
+            k = str(op.get("kind") or "fact").strip()
+            oid = int(op.get("id", 0))
+            if k == "fact":
+                vu = parse_when(str(op.get("valid_until", ""))) \
+                    if op.get("valid_until") not in (None, "") else None
+                body = op.get("body")
+                body = self._clean(str(body)) if body not in (None, "") else None
+                imp = op.get("importance", -1.0)
+                out = self.store.update_fact(
+                    oid, body=body,
+                    importance=None if imp is None or float(imp) < 0 else float(imp),
+                    valid_until=vu, owner=owner, _commit=False)
+                if out is None:
+                    raise ValueError(f"fact {oid} not found (or owner mismatch)")
+                return {"index": i, "op": kind, "kind": k,
+                        "status": out["status"], "id": out["id"]}, None
+            if k in ("edge", "link"):
+                vu = parse_when(str(op.get("valid_until", "")))
+                if vu is None:
+                    raise ValueError(f"kind={k!r} needs valid_until")
+                upd = (self.store.update_edge if k == "edge"
+                       else self.store.update_link)
+                done = upd(oid, vu, owner, _commit=False)
+                return {"index": i, "op": kind, "kind": k, "updated": done,
+                        "status": "reopened" if vu == 0 else "expired"}, None
+            raise ValueError(f"unknown kind {k!r}: fact | edge | link")
+        if kind == "forget":
+            k = str(op.get("kind") or "fact").strip()
+            oid = int(op.get("id", 0))
+            if k == "fact":
+                deleted = self.store.delete_fact(oid, owner, _commit=False)
+            elif k == "edge":
+                deleted = self.store.delete_edge(oid, owner, _commit=False)
+            elif k == "link":
+                deleted = self.store.delete_link(oid, owner, _commit=False)
+            else:
+                raise ValueError(f"unknown kind {k!r}: fact | edge | link")
+            return {"index": i, "op": kind, "kind": k, "deleted": deleted}, None
+        raise ValueError(f"unknown op {kind!r}: remember_fact | update | forget")
+
+    def compact_session(self, session_id: str, keep_tail: int = 20,                        max_sentences: int = 8, owner: str = "") -> dict:
         """Ручное сжатие. Уважает frontier: уже покрытое не дублирует (2.2)."""
         if self.summarizer is None:
             raise ValueError("no summarizer configured")
