@@ -95,6 +95,23 @@ CREATE TABLE IF NOT EXISTS um_edges (
     created_at REAL NOT NULL,
     valid_until REAL NOT NULL DEFAULT 0  -- 0 = живое; замена ребра = новое ребро
 );
+
+-- ADR-001: типизированные связи памяти (message<->fact, fact<->fact).
+-- Traversal-only: ни FTS, ни векторов; um_edges (entity-граф) не трогаем.
+CREATE TABLE IF NOT EXISTS um_links (
+    id INTEGER PRIMARY KEY,
+    src_table TEXT NOT NULL,
+    src_id INTEGER NOT NULL,
+    dst_table TEXT NOT NULL,
+    dst_id INTEGER NOT NULL,
+    rel TEXT NOT NULL CHECK (rel IN
+        ('supports', 'contradicts', 'supersedes', 'derives_from')),
+    weight REAL NOT NULL DEFAULT 1.0,
+    owner TEXT NOT NULL DEFAULT '',
+    session_id TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    valid_until REAL NOT NULL DEFAULT 0  -- 0 = живое
+);
 """
 
 _INDEXES = [
@@ -117,6 +134,12 @@ _INDEXES = [
     # Создаётся ПОСЛЕ миграции и dedupe — иначе падает на грязной БД.
     "CREATE UNIQUE INDEX IF NOT EXISTS ux_um_facts_live"
     " ON um_facts(owner, category, name) WHERE valid_until = 0",
+    # ADR-001: связи. D3 — одна живая связь на (src, dst, rel, owner).
+    "CREATE INDEX IF NOT EXISTS idx_um_links_src ON um_links(src_table, src_id)",
+    "CREATE INDEX IF NOT EXISTS idx_um_links_dst ON um_links(dst_table, dst_id)",
+    "CREATE INDEX IF NOT EXISTS idx_um_links_owner ON um_links(owner)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_um_links_live ON um_links("
+    "src_table, src_id, dst_table, dst_id, rel, owner) WHERE valid_until = 0",
 ]
 
 _FTS_SCHEMA = """
