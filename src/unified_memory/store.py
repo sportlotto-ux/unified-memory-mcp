@@ -1808,6 +1808,30 @@ class Store:
         out["duplicate_facts"] = self._duplicate_facts()
         return out
 
+    def rebuild_fts(self) -> bool:
+        """Полная пересборка um_fts из родителей (формат тел — как _fts_index).
+
+        Без лока: вызывается из locked-контекста (repair) и из import-транзакции.
+        """
+        if not self.fts:
+            return False
+        self.conn.execute("DELETE FROM um_fts")
+        self.conn.execute(
+            "INSERT INTO um_fts(owner_table, owner_id, body)"
+            " SELECT 'um_messages', id, content FROM um_messages")
+        self.conn.execute(
+            "INSERT INTO um_fts(owner_table, owner_id, body)"
+            " SELECT 'um_summaries', id, body FROM um_summaries")
+        self.conn.execute(
+            "INSERT INTO um_fts(owner_table, owner_id, body)"
+            " SELECT 'um_facts', id, name || ' ' || body FROM um_facts")
+        self.conn.execute(
+            """INSERT INTO um_fts(owner_table, owner_id, body)
+               SELECT 'um_edges', e.id, s.display || ' ' || e.predicate || ' ' || o.display
+               FROM um_edges e JOIN um_entities s ON s.id=e.subject_id
+               JOIN um_entities o ON o.id=e.object_id""")
+        return True
+
     @_locked
     def repair(self, dim: int = 0, backup_path: str = "") -> dict:
         """Backup-first ремонт: бэкап VACUUM INTO, чистка сирот, пересборка FTS/vec.
@@ -1834,21 +1858,7 @@ class Store:
                     (ot, oid))
             report["purged_fts"] = len(dirty["orphan_fts"])
             # Полная пересборка FTS из родителей (формат тел — как _fts_index).
-            self.conn.execute("DELETE FROM um_fts")
-            self.conn.execute(
-                "INSERT INTO um_fts(owner_table, owner_id, body)"
-                " SELECT 'um_messages', id, content FROM um_messages")
-            self.conn.execute(
-                "INSERT INTO um_fts(owner_table, owner_id, body)"
-                " SELECT 'um_summaries', id, body FROM um_summaries")
-            self.conn.execute(
-                "INSERT INTO um_fts(owner_table, owner_id, body)"
-                " SELECT 'um_facts', id, name || ' ' || body FROM um_facts")
-            self.conn.execute(
-                """INSERT INTO um_fts(owner_table, owner_id, body)
-                   SELECT 'um_edges', e.id, s.display || ' ' || e.predicate || ' ' || o.display
-                   FROM um_edges e JOIN um_entities s ON s.id=e.subject_id
-                   JOIN um_entities o ON o.id=e.object_id""")
+            self.rebuild_fts()
             report["fts_rebuilt"] = True
         self._prune_orphan_entities()
         dwhere, dparams = self._dangling_conditions()

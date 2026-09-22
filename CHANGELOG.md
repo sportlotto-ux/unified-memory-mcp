@@ -12,6 +12,12 @@
 - **A2**: вектора на update/reopen. `Ingest.update_fact` переэмбеддивает новую версию
   (`superseded`) и reopened факт (вектор был удалён при expire, P4.8); batch-совместимо
   (`_commit=False`), `backend=None` — no-op.
+- **D16**: экспорт — стриминговый JSONL (`um-export-jsonl`): header + `{table,row}` построчно;
+  um_fts/um_vecidx исключены (производные), вектора base64; ридер понимает legacy single-JSON.
+- **B6**: `python -m unified_memory.import_dump <file> [--owner] [--dry-run]` — fresh-id remap,
+  аддитивность (skip-слот без перезаписи), owner-override, без re-redaction, отказ на
+  неизвестную таблицу/версию; работает без backend; весь импорт транзакционен.
+- **C13**: batch-op `remember` (сообщение) в `mem_batch`.
 ### Fixed
 - Явный `weight=0.0` у линка больше не съедается дефолтом 1.0; `hops=None` в `Router`
   нормализуется в 1 (аудит v0.7.3, P4).
