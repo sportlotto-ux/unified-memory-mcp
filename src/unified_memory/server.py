@@ -30,7 +30,8 @@ from unified_memory.store import Store  # noqa: E402
 from unified_memory.summarize import default_summarizer  # noqa: E402
 from unified_memory import archive  # noqa: E402
 from unified_memory.recent import parse_as_of, parse_period, parse_when  # noqa: E402
-from unified_memory.evidence import run_cite, run_compute, run_conflicts  # noqa: E402
+from unified_memory.evidence import (  # noqa: E402
+    parse_ref, run_cite, run_compute, run_conflicts)
 
 mcp = _Server("unified-memory")
 
@@ -132,6 +133,20 @@ def mem_fact(category: str, name: str, body: str,
     return json.dumps({"id": _ingest().remember_fact(
         category, name, body, importance, subject, predicate, object,
         session_id, owner)})
+
+
+@mcp.tool()
+def mem_link(src: str, dst: str, rel: str, weight: float = 1.0,
+             session_id: str = "", owner: str = "") -> str:
+    """Typed memory link (ADR-001). src/dst like 'fact:3' | 'message:12' |
+    'summary:2' | 'edge:5'. rel: supports | contradicts | supersedes | derives_from.
+    Both endpoints must exist and belong to `owner`. Re-linking a live
+    (src,dst,rel,owner) is a no-op returning the existing id (created=false)."""
+    _ingest()
+    st, sid = parse_ref(src)
+    dt, did = parse_ref(dst)
+    out = _store().link(st, sid, dt, did, rel, weight, session_id, owner)
+    return json.dumps(out, ensure_ascii=False)
 
 
 @mcp.tool()

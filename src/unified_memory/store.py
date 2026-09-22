@@ -100,13 +100,15 @@ CREATE TABLE IF NOT EXISTS um_edges (
 -- Traversal-only: ни FTS, ни векторов; um_edges (entity-граф) не трогаем.
 CREATE TABLE IF NOT EXISTS um_links (
     id INTEGER PRIMARY KEY,
-    src_table TEXT NOT NULL,
+    src_table TEXT NOT NULL CHECK (src_table IN
+        ('um_messages', 'um_facts', 'um_summaries', 'um_edges')),
     src_id INTEGER NOT NULL,
-    dst_table TEXT NOT NULL,
+    dst_table TEXT NOT NULL CHECK (dst_table IN
+        ('um_messages', 'um_facts', 'um_summaries', 'um_edges')),
     dst_id INTEGER NOT NULL,
     rel TEXT NOT NULL CHECK (rel IN
         ('supports', 'contradicts', 'supersedes', 'derives_from')),
-    weight REAL NOT NULL DEFAULT 1.0,
+    weight REAL NOT NULL DEFAULT 1.0 CHECK (weight >= 0),
     owner TEXT NOT NULL DEFAULT '',
     session_id TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL,
@@ -236,6 +238,11 @@ class Hit:
     created_at: float = 0.0  # v0.4-п.3: штампует Router для recency-приора
 
 
+# ADR-001: закрытые словари связей. Расширение — миграцией (CHECK + DDL).
+LINK_RELS = ("supports", "contradicts", "supersedes", "derives_from")
+LINK_TABLES = ("um_messages", "um_facts", "um_summaries", "um_edges")
+
+
 class Store:
     """Синхронное ядро. Один инстанс на процесс (см. single-writer в MIGRATION_PLAN)."""
 
@@ -295,6 +302,15 @@ class Store:
         if "valid_until" not in ecols2:
             self.conn.execute(
                 "ALTER TABLE um_edges ADD COLUMN valid_until REAL NOT NULL DEFAULT 0")
+            self.conn.commit()
+        # v0.7: um_links получил CHECK на концы/вес ПОСЛЕ первых прогонов.
+        # Таблица гарантированно пустая (v0.7 не выпущен) → пересборка безопасна.
+        lrow = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='um_links'"
+        ).fetchone()
+        if lrow and "CHECK (src_table" not in (lrow[0] or ""):
+            self.conn.executescript("DROP TABLE um_links;")
+            self.conn.executescript(SCHEMA)
             self.conn.commit()
         self._dedupe_live_slots()
         # Индексы строго после миграций: на legacy-таблицах колонок ещё нет.
@@ -1281,6 +1297,57 @@ class Store:
         self._fts_index("um_edges", eid, f"{subject} {predicate} {obj}")
         self.conn.commit()
         return eid
+
+    @_locked
+    def link(self, src_table: str, src_id: int, dst_table: str, dst_id: int,
+             rel: str, weight: float = 1.0, session_id: str = "",
+             owner: str = "") -> dict:
+        """Типизированная связь (ADR-001). D4: оба конца существуют и owner-совпадают.
+        D3: повторный вызов для живого (src,dst,rel,owner) — no-op, отдаёт тот же id.
+        session_id наследуется от вызова (у концов сессии могут различаться)."""
+        import time as _t
+        if src_table not in LINK_TABLES or dst_table not in LINK_TABLES:
+            raise ValueError(
+                f"bad endpoint table: {src_table!r}/{dst_table!r}; "
+                f"ожидаю {list(LINK_TABLES)}")
+        if rel not in LINK_RELS:
+            raise ValueError(f"unknown rel {rel!r}: {list(LINK_RELS)}")
+        if weight < 0:
+            raise ValueError("weight must be >= 0")
+        for tbl, oid in ((src_table, src_id), (dst_table, dst_id)):
+            row = self.conn.execute(
+                f"SELECT owner FROM {tbl} WHERE id=?", (oid,)).fetchone()
+            if row is None:
+                raise ValueError(f"endpoint {tbl}:{oid} not found")
+            if (row[0] or "") != owner:
+                raise ValueError(f"endpoint {tbl}:{oid} owner mismatch")
+        key = (src_table, src_id, dst_table, dst_id, rel, owner)
+        row = self.conn.execute(
+            "SELECT id FROM um_links WHERE src_table=? AND src_id=? AND dst_table=?"
+            " AND dst_id=? AND rel=? AND owner=? AND valid_until=0", key).fetchone()
+        if row:
+            return {"id": row[0], "created": False, "rel": rel,
+                    "src": f"{src_table}:{src_id}", "dst": f"{dst_table}:{dst_id}"}
+        try:
+            cur = self.conn.execute(
+                "INSERT INTO um_links(src_table, src_id, dst_table, dst_id, rel,"
+                " weight, owner, session_id, created_at, valid_until)"
+                " VALUES(?,?,?,?,?,?,?,?,?,0)",
+                (src_table, src_id, dst_table, dst_id, rel, weight, owner,
+                 session_id, _t.time()))
+            lid = cur.lastrowid
+            self.conn.commit()
+        except sqlite3.IntegrityError:
+            # гонка: связь создали между SELECT и INSERT
+            row = self.conn.execute(
+                "SELECT id FROM um_links WHERE src_table=? AND src_id=? AND dst_table=?"
+                " AND dst_id=? AND rel=? AND owner=? AND valid_until=0", key).fetchone()
+            if not row:
+                raise
+            return {"id": row[0], "created": False, "rel": rel,
+                    "src": f"{src_table}:{src_id}", "dst": f"{dst_table}:{dst_id}"}
+        return {"id": lid, "created": True, "rel": rel,
+                "src": f"{src_table}:{src_id}", "dst": f"{dst_table}:{dst_id}"}
 
     @_locked
     def neighbors(self, entity_name: str, session_id: str = "",
