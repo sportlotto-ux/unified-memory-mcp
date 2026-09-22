@@ -115,6 +115,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 - Isolation: `owner=""` (дефолт) — legacy без фильтра, видит всё; непустой owner — строгая изоляция во всех тулах. Старые БД мигрируют сами (owner=''), сущности пересобираются под UNIQUE(name, owner).
 - Redaction forward-only: сторa, созданные до v0.4, могут содержать секреты — чистить руками + reindex.
 - `UM_VEC_TYPE` удалён: вектора всегда float32, конфиг больше не врёт.
+- Тесты герметичны: ambient `UM_*` из шелла не влияет на прогон (`tests/conftest.py` чистит env; `UM_LIVE_*` — opt-in гейты, их не трогает).
 - Смена embedding-модели требует reindex (зато громко падает, а не молча врёт — см. `DimensionMismatchError`). Ранние сторa на MiniLM-384 с дефолтом mpnet-768 несовместимы: пересоздайте БД или задайте `UM_EMBEDDING_MODEL` явно.
 
 ## Разработка
@@ -122,5 +123,9 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 ```bash
 python -m pytest tests/ -q   # 109 passed, 4 skipped без fastembed/vec; UM_LIVE_OPENAI=1 — live против 8127
 ```
+
+Прогон герметичен: `tests/conftest.py` снимает ambient `UM_*` (иначе шелл с
+`UM_REDACT_ENABLED=off` или `UM_EMBEDDING_BACKEND=openai` молча ронял 12 тестов).
+Тестам с env — только `monkeypatch.setenv`. `UM_LIVE_*` конфигом не считается.
 
 Roadmap и разбор апстримов: `docs/MIGRATION_PLAN.md`. Переезд с hermes-lcm/mnemosyne: `docs/IMPORT.md`.
