@@ -192,3 +192,36 @@ def test_server_hops_wiring_and_cap(srv):
         srv.mem_recall(query="яблоко", hops=99)
     with pytest.raises(ValueError, match="hops must be"):
         srv.mem_recall(query="яблоко", hops=0)
+
+
+# ---------- A1: вес линка умножает графовый скор ----------
+
+def test_link_weight_multiplies_score(rig):
+    st, r = rig
+    a = _fact(st, "c", "a", "якорь уникальный")
+    b = _fact(st, "c", "b", "обычное тело")
+    c = _fact(st, "c", "c", "другое тело")
+    st.link("um_facts", a, "um_facts", b, "supports", weight=1.0)
+    st.link("um_facts", a, "um_facts", c, "supports", weight=3.0)
+    # сырой графовый скор: weight умножает базу (до RRF-фьюжена)
+    gd = {(h.owner_table, h.owner_id): h.score
+          for h in r._graph_bfs("якорь", "all", "", 10, "", False, None, 2, "",
+                                [("um_facts", a)])}
+    assert abs(gd[("um_facts", c)] - 3 * gd[("um_facts", b)]) < 1e-9
+    # публичный путь: взвешенный узел идёт выше равного
+    hits = r.recall("якорь", scope="all", limit=10, hops=2)
+    d = {(h.owner_table, h.owner_id): h.score for h in hits}
+    assert d[("um_facts", c)] > d[("um_facts", b)]
+
+
+# ---------- №22: удалённый конец линка — graceful-skip + счётчик ----------
+
+def test_deleted_link_end_graceful_skip(rig):
+    st, r = rig
+    a = _fact(st, "c", "a", "якорь уникальный")
+    b = _fact(st, "c", "b", "исчезнет")
+    st.link("um_facts", a, "um_facts", b, "supports")
+    st.delete_fact(b)  # жёсткое удаление: линк висит, каскада по линкам нет
+    hits = r.recall("якорь", scope="all", limit=10, hops=2, diagnostics=True)
+    assert all(h.owner_id != b for h in hits)  # обход не падает и не отдаёт мёртвое
+    assert r.last_stats["diagnostics"]["bfs"]["skipped_missing"] >= 1

@@ -4,6 +4,19 @@
 архитектура и устранение мёртвого API. Не чинить впопыхах: каждый требует
 своего мини-дизайна и теста.
 
+## Вердикт по плану 21 пункта (аудит-6) → `docs/V0.7.3_PLAN.md`
+Ревьюер одобрил быстрый набор для **v0.7.3** (A1 weight-скоринг, A4 FTS-сниппет,
+B7 archive_check, B8 secret_scan, B9 WAL-checkpoint, B10 кап текста, A5 детект
+дублей, C11 аннотации, E19 матрица CI, CHANGELOG, №22 graceful-skip). Спроектированное
+(import/batch/JSONL/eval/fuzz) → **v0.8**; **A3** (usage-importance) → эксперимент за
+флагом после бенча D17; **mem_digest** — отклонён (YAGNI).
+Поправки приняты: п.12 — `server.py` покрыт тул-уровнем (`srv`-фикстура, 7+ сьютов),
+C12 = один smoke; п.18 — три extra (`local-embed`/`local-vec`/`tokens`), полный CI
+требует всех трёх.
+№22: `mem_forget`/`delete_*` не каскадят `um_links` (каскада нет by design). В 0.7.3 —
+только graceful-skip в BFS (`node_ok`) + счётчик `bfs.skipped_missing`; каскадное
+удаление линков — отдельное решение (GDPR vs provenance).
+
 ## ✅ Внешний аудит-6 — исправлено в v0.7.2 (крит: CI был красный)
 1. 🟥 Тесты зависели от **необъявленного `tiktoken`**: `test_auto_compact_on_pressure`
    падал на чистой инсталляции (CI: `pip install -e . pytest`). Фикс: `tiktoken`

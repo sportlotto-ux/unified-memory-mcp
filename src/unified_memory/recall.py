@@ -257,6 +257,7 @@ class Router:
         visited: set[tuple[str, int]] = set()
         node_cap = max(limit * fanout, 100)  # страховка от dense-взрыва
         self._bfs_links_count = 0
+        self._bfs_skipped = 0  # №22: концов нет/тело недоступно — graceful-skip
         queue: list[tuple[str, int, int]] = []
         emitted: dict[tuple[str, int], tuple[float, str, str]] = {}
 
@@ -308,7 +309,8 @@ class Router:
 
         self.last_stats["bfs"] = {"nodes": len(visited),
                                   "links": self._bfs_links_count,
-                                  "emitted": len(emitted), "max_hops": max_hops}
+                                  "emitted": len(emitted), "max_hops": max_hops,
+                                  "skipped_missing": self._bfs_skipped}
         hits = [Hit(k[0], k[1], v[1], v[0], v[2]) for k, v in emitted.items()]
         hits.sort(key=lambda h: -h.score)
         return hits[:limit]
@@ -326,11 +328,16 @@ class Router:
         for nb in nbs:
             nt, nid = nb["table"], nb["id"]
             key = (nt, nid)
-            if key not in emitted and key not in seed_keys \
-                    and self.store.node_ok(nt, nid, owner, include_expired, as_of):
-                found = self.store.bodies_for([(nt, nid)]).get((nt, nid))
-                if found and found[0] is not None:
-                    emitted[key] = (score, found[0], found[1])
+            w = float(nb.get("weight", 1.0) or 1.0)  # A1: вес линка в скоринге
+            if key not in emitted and key not in seed_keys:
+                if self.store.node_ok(nt, nid, owner, include_expired, as_of):
+                    found = self.store.bodies_for([(nt, nid)]).get((nt, nid))
+                    if found and found[0] is not None:
+                        emitted[key] = (score * w, found[0], found[1])
+                    else:
+                        self._bfs_skipped += 1  # №22: тело недоступно
+                else:
+                    self._bfs_skipped += 1  # №22: конец удалён/истёк
             enqueue(nt, nid, nd)
             if len(emitted) >= limit:
                 return
