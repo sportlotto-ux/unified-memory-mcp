@@ -85,3 +85,26 @@ def parse_period(period: str, now: datetime | None = None) -> PeriodWindow:
         return PeriodWindow(requested, (current - timedelta(hours=h)).timestamp(),
                             current.timestamp())
     raise ValueError(f"period must be one of: {PERIODS_HELP}")
+
+
+def parse_when(value: str, now: datetime | None = None) -> float | None:
+    """Время для valid_until: "" = не трогать (None), "open" = reopen (0),
+    "now" | ISO-date | epoch-число = timestamp истечения. Мусор — громко."""
+    if value is None or not str(value).strip():
+        return None
+    v = str(value).strip().lower()
+    if v in ("open", "0"):
+        return 0.0
+    current = _utc_now(now)
+    if v == "now":
+        return current.timestamp()
+    try:
+        d = date.fromisoformat(v)
+        return _day_start(d).timestamp()
+    except ValueError:
+        pass
+    try:
+        return float(v)
+    except ValueError as exc:
+        raise ValueError(
+            "valid_until must be '', 'open', 'now', YYYY-MM-DD or epoch") from exc

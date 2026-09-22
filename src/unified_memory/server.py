@@ -27,7 +27,7 @@ from unified_memory.embeddings import make_backend  # noqa: E402
 from unified_memory.ingest import Ingest  # noqa: E402
 from unified_memory.store import Store  # noqa: E402
 from unified_memory.summarize import default_summarizer  # noqa: E402
-from unified_memory.recent import parse_period  # noqa: E402
+from unified_memory.recent import parse_period, parse_when  # noqa: E402
 
 mcp = _Server("unified-memory")
 
@@ -86,9 +86,12 @@ def mem_fact(category: str, name: str, body: str,
 
 @mcp.tool()
 def mem_recall(query: str, scope: str = "all", session_id: str = "",
-               limit: int = 10, owner: str = "") -> str:
-    """Unified search: FTS + vectors + RRF. Scope: all | session | facts."""
-    hits = _ingest().router().recall(query, scope, session_id, limit, owner)
+               limit: int = 10, owner: str = "",
+               include_expired: bool = False) -> str:
+    """Unified search: FTS + vectors + RRF. Scope: all | session | facts.
+    Истёкшие (valid_until) прячутся; include_expired=True — аудит истории."""
+    hits = _ingest().router().recall(query, scope, session_id, limit, owner,
+                                     include_expired)
     out = []
     for h in hits:
         body = h.body[:2000]
@@ -115,7 +118,34 @@ def mem_expand(kind: str, id: int, owner: str = "") -> str:
     if owner and _store().owners_for([(table, int(id))]).get((table, int(id)), "") != owner:
         return json.dumps({"kind": kind, "id": int(id), "body": None}, ensure_ascii=False)
     body, _ = _store()._body_of(table, int(id))
-    return json.dumps({"kind": kind, "id": int(id), "body": body}, ensure_ascii=False)
+    meta = _store().row_meta(table, int(id))  # valid_until / superseded_by
+    return json.dumps({"kind": kind, "id": int(id), "body": body, **meta},
+                      ensure_ascii=False)
+
+
+@mcp.tool()
+def mem_update(kind: str = "fact", id: int = 0, body: str = "",
+               importance: float = -1.0, valid_until: str = "",
+               owner: str = "") -> str:
+    """Edit a fact by id (new version, keeps history) or expire/reopen fact|edge.
+    valid_until: "" = unchanged, "open" = reopen (0), "now" | ISO-date | epoch = expire."""
+    store = _store()
+    vu = parse_when(valid_until) if kind in ("fact", "edge") else None
+    if kind == "fact":
+        out = store.update_fact(
+            int(id), body=body or None,
+            importance=None if importance < 0 else importance,
+            valid_until=vu, owner=owner)
+        if out is None:
+            raise ValueError(f"fact {id} not found (or owner mismatch)")
+        return json.dumps(out)
+    if kind == "edge":
+        if vu is None:
+            raise ValueError("kind='edge' needs valid_until ('open' or a date)")
+        ok = store.update_edge(int(id), vu, owner)
+        return json.dumps({"id": int(id), "updated": ok,
+                           "status": "reopened" if vu == 0 else "expired"})
+    raise ValueError(f"unknown kind {kind!r}: fact | edge")
 
 
 @mcp.tool()

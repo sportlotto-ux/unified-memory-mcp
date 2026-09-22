@@ -49,9 +49,26 @@ class Ingest:
                       importance: float = 0.5, subject: str = "",
                       predicate: str = "", obj: str = "",
                       session_id: str = "", owner: str = "") -> int:
+        """Слот-запись факта. Возвращает id живого факта (совместимость)."""
+        return self.upsert_fact(category, name, body, importance, subject,
+                                predicate, obj, session_id, owner)["id"]
+
+    def upsert_fact(self, category: str, name: str, body: str,
+                    importance: float = 0.5, subject: str = "",
+                    predicate: str = "", obj: str = "",
+                    session_id: str = "", owner: str = "") -> dict:
+        """Слот-запись + вектора/рёбра. Возвращает {id, status, superseded_id}.
+
+        status: created | superseded (новое тело) | noop (то же тело) |
+        updated (только importance). Вектора/рёбра плодим лишь при created/
+        superseded — при noop/updated они уже на том же id.
+        """
         name, body = self._clean(name), self._clean(body)
         subject, predicate, obj = (self._clean(s) for s in (subject, predicate, obj))
-        fid = self.store.add_fact(category, name, body, importance, owner)
+        out = self.store.add_fact_ex(category, name, body, importance, owner)
+        fid = out["id"]
+        if out["status"] in ("noop", "updated"):
+            return out
         if self.backend is not None:
             self.store.add_vector("um_facts", fid,
                                   self.backend.embed_docs([f"{name} {body}"])[0],
@@ -72,7 +89,7 @@ class Ingest:
                         "um_entities", ent_id,
                         self.backend.embed_docs([ent])[0],
                         self.backend.model_name, owner)
-        return fid
+        return out
 
     def compact_session(self, session_id: str, keep_tail: int = 20,
                         max_sentences: int = 8, owner: str = "") -> dict:

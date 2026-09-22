@@ -55,7 +55,12 @@ CREATE TABLE IF NOT EXISTS um_facts (
     body TEXT NOT NULL,
     importance REAL NOT NULL DEFAULT 0.5,
     created_at REAL NOT NULL,
-    updated_at REAL NOT NULL
+    updated_at REAL NOT NULL,
+    -- Слот-семантика (v0.5): 0 = живое (sentinel!), иначе timestamp истечения.
+    -- NOT NULL обязателен: NULL-строки выпали бы из WHERE valid_until=0
+    -- и обошли бы partial unique index ниже.
+    valid_until REAL NOT NULL DEFAULT 0,
+    superseded_by INTEGER NOT NULL DEFAULT 0  -- цепочка версий, как у саммари
 );
 
 
@@ -87,7 +92,8 @@ CREATE TABLE IF NOT EXISTS um_edges (
     session_id TEXT NOT NULL DEFAULT '',
     owner TEXT NOT NULL DEFAULT '',
     fact_id INTEGER NOT NULL DEFAULT 0,  -- provenance: какой mem_fact породил
-    created_at REAL NOT NULL
+    created_at REAL NOT NULL,
+    valid_until REAL NOT NULL DEFAULT 0  -- 0 = живое; замена ребра = новое ребро
 );
 """
 
@@ -107,6 +113,10 @@ _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_um_edges_session ON um_edges(session_id)",
     "CREATE INDEX IF NOT EXISTS idx_um_edges_owner ON um_edges(owner, session_id)",
     "CREATE INDEX IF NOT EXISTS idx_um_entities_owner ON um_entities(owner)",
+    # v0.5: один живой факт на слот (owner, category, name). Partial по sentinel 0.
+    # Создаётся ПОСЛЕ миграции и dedupe — иначе падает на грязной БД.
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_um_facts_live"
+    " ON um_facts(owner, category, name) WHERE valid_until = 0",
 ]
 
 _FTS_SCHEMA = """
@@ -251,6 +261,19 @@ class Store:
                 ALTER TABLE um_entities_new RENAME TO um_entities;
             """)
             self.conn.commit()
+        # v0.5: valid_until (sentinel 0 = живое) + superseded_by на фактах.
+        fcols = [r[1] for r in self.conn.execute("PRAGMA table_info(um_facts)")]
+        for col, ddl in (("valid_until", "REAL NOT NULL DEFAULT 0"),
+                         ("superseded_by", "INTEGER NOT NULL DEFAULT 0")):
+            if col not in fcols:
+                self.conn.execute(f"ALTER TABLE um_facts ADD COLUMN {col} {ddl}")
+                self.conn.commit()
+        ecols2 = [r[1] for r in self.conn.execute("PRAGMA table_info(um_edges)")]
+        if "valid_until" not in ecols2:
+            self.conn.execute(
+                "ALTER TABLE um_edges ADD COLUMN valid_until REAL NOT NULL DEFAULT 0")
+            self.conn.commit()
+        self._dedupe_live_slots()
         # Индексы строго после миграций: на legacy-таблицах колонок ещё нет.
         for stmt in _INDEXES:
             self.conn.execute(stmt)
@@ -325,17 +348,193 @@ class Store:
     @_locked
     def add_fact(self, category: str, name: str, body: str,
                  importance: float = 0.5, owner: str = "") -> int:
+        """Слот-запись: то же тело — no-op, новое — supersede-цепочка. Возвращает id живого."""
+        return self._upsert_fact(category, name, body, importance, owner)["id"]
+
+    @_locked
+    def add_fact_ex(self, category: str, name: str, body: str,
+                    importance: float = 0.5, owner: str = "") -> dict:
+        """Слот-запись с полным статусом: {id, status, superseded_id}."""
+        return self._upsert_fact(category, name, body, importance, owner)
+
+    def _upsert_fact(self, category: str, name: str, body: str,
+                     importance: float, owner: str = "",
+                     _depth: int = 0) -> dict:
+        """Ядро слот-семантики (v0.5). Без лока — из locked-контекста.
+
+        Живой слот = (owner, category, name, valid_until=0); partial unique index
+        делает «два живых» невозможными на уровне БД. Expire-then-insert
+        атомарен внутри @_locked, IntegrityError — только backstop на гонку.
+        """
         importance = max(0.0, min(1.0, importance))  # кап вместо жёстких 0.95
         now = time.time()
-        cur = self.conn.execute(
-            "INSERT INTO um_facts(owner, category, name, body, importance, created_at, updated_at)"
-            " VALUES(?,?,?,?,?,?,?)",
-            (owner, category, name, body, importance, now, now),
-        )
+        row = self.conn.execute(
+            "SELECT id, body, importance FROM um_facts WHERE owner=? AND category=?"
+            " AND name=? AND valid_until=0", (owner, category, name)).fetchone()
+        if row is not None:
+            fid, old_body, old_imp = row
+            if old_body == body:
+                if abs(old_imp - importance) > 1e-9:
+                    self.conn.execute(
+                        "UPDATE um_facts SET importance=?, updated_at=? WHERE id=?",
+                        (importance, now, fid))
+                    self.conn.commit()
+                    return {"id": fid, "status": "updated", "superseded_id": 0}
+                return {"id": fid, "status": "noop", "superseded_id": 0}
+            # Expire-then-insert: partial unique index не пустит новый живой
+            # факт, пока старой живёт. При сбое вставки — rollback вернёт старую.
+            try:
+                self.conn.execute(
+                    "UPDATE um_facts SET valid_until=?, updated_at=? WHERE id=?",
+                    (now, now, fid))
+                cur = self.conn.execute(
+                    "INSERT INTO um_facts(owner, category, name, body, importance,"
+                    " created_at, updated_at, valid_until, superseded_by)"
+                    " VALUES(?,?,?,?,?,?,?,0,0)",
+                    (owner, category, name, body, importance, now, now))
+            except sqlite3.IntegrityError:
+                self.conn.rollback()
+                if _depth >= 1:
+                    raise
+                return self._upsert_fact(category, name, body, importance, owner,
+                                         _depth + 1)
+            nid = cur.lastrowid
+            self.conn.execute(
+                "UPDATE um_facts SET superseded_by=? WHERE id=?", (nid, fid))
+            # Рёбра старой версии истекают вместе с ней (граф не отдаёт stale).
+            self.conn.execute(
+                "UPDATE um_edges SET valid_until=? WHERE fact_id=? AND valid_until=0",
+                (now, fid))
+            self._fts_index("um_facts", nid, f"{name} {body}")
+            self.conn.commit()
+            return {"id": nid, "status": "superseded", "superseded_id": fid}
+        try:
+            cur = self.conn.execute(
+                "INSERT INTO um_facts(owner, category, name, body, importance,"
+                " created_at, updated_at, valid_until, superseded_by)"
+                " VALUES(?,?,?,?,?,?,?,0,0)",
+                (owner, category, name, body, importance, now, now))
+        except sqlite3.IntegrityError:
+            # backstop: слот занят вне этого процесса — перечитать и свести
+            self.conn.rollback()
+            if _depth >= 1:
+                raise
+            return self._upsert_fact(category, name, body, importance, owner,
+                                     _depth + 1)
         fid = cur.lastrowid
         self._fts_index("um_facts", fid, f"{name} {body}")
         self.conn.commit()
-        return fid
+        return {"id": fid, "status": "created", "superseded_id": 0}
+
+    @_locked
+    def update_fact(self, fid: int, body: str | None = None,
+                    importance: float | None = None,
+                    valid_until: float | None = None,
+                    owner: str = "") -> dict | None:
+        """Правка факта по id без потери provenance.
+
+        valid_until in-place (0 = reopen), затем body/importance. Новое тело =
+        новая версия (supersede), id меняется, chain фиксируется в superseded_by.
+        """
+        row = self.conn.execute(
+            "SELECT owner, category, name, body, importance, valid_until"
+            " FROM um_facts WHERE id=?", (fid,)).fetchone()
+        if not row:
+            return None
+        r_owner, cat, name, cur_body, cur_imp, cur_vu = row
+        if owner and (r_owner or "") != owner:
+            return None
+        if valid_until is not None:
+            self.conn.execute(
+                "UPDATE um_facts SET valid_until=?, updated_at=? WHERE id=?",
+                (float(valid_until), time.time(), fid))
+            self.conn.commit()
+            status = "reopened" if float(valid_until) == 0 else "expired"
+            return {"id": fid, "status": status, "superseded_id": 0}
+        if body is not None and body != cur_body:
+            if cur_vu > 0:
+                raise ValueError(
+                    "cannot edit expired fact; reopen with valid_until=0 first")
+            return self._upsert_fact(
+                cat, name, body,
+                importance if importance is not None else cur_imp,
+                r_owner or "")
+        if importance is not None and abs(importance - cur_imp) > 1e-9:
+            self.conn.execute(
+                "UPDATE um_facts SET importance=?, updated_at=? WHERE id=?",
+                (max(0.0, min(1.0, importance)), time.time(), fid))
+            self.conn.commit()
+            return {"id": fid, "status": "updated", "superseded_id": 0}
+        return {"id": fid, "status": "noop", "superseded_id": 0}
+
+    @_locked
+    def update_edge(self, eid: int, valid_until: float, owner: str = "") -> bool:
+        """Истечение/reopen ребра (mnemosyne triple_end). Замена = новое ребро."""
+        row = self.conn.execute(
+            "SELECT owner FROM um_edges WHERE id=?", (eid,)).fetchone()
+        if not row:
+            return False
+        if owner and (row[0] or "") != owner:
+            return False
+        self.conn.execute("UPDATE um_edges SET valid_until=? WHERE id=?",
+                          (float(valid_until), eid))
+        self.conn.commit()
+        return True
+
+    def _dedupe_live_slots(self) -> None:
+        """Lossless дедуп живых слотов (legacy): keeper = max(id), прочие superseded.
+
+        Без лока — из __init__ до создания partial unique index: без этого
+        CREATE UNIQUE INDEX упал бы на БД с дублями (IntegrityError).
+        """
+        rows = self.conn.execute(
+            "SELECT owner, category, name, id FROM um_facts WHERE valid_until=0"
+            " ORDER BY owner, category, name, id").fetchall()
+        keeper: dict[tuple, int] = {}
+        doomed: list[tuple[int, int]] = []
+        for owner, cat, name, fid in rows:
+            key = (owner, cat, name)
+            prev = keeper.get(key)
+            if prev is not None:
+                doomed.append((prev, fid))  # prev старше -> superseded новым
+            keeper[key] = fid
+        if not doomed:
+            return
+        now = time.time()
+        for old, new in doomed:
+            self.conn.execute(
+                "UPDATE um_facts SET valid_until=?, superseded_by=? WHERE id=?",
+                (now, new, old))
+        self.conn.commit()
+
+    @_locked
+    def validity_for(self, refs: list[tuple[str, int]]) -> dict[tuple[str, int], float]:
+        """Batch valid_until для фактов/рёбер (0 = живое). Прочие таблицы без TTL."""
+        out: dict[tuple[str, int], float] = {}
+        by_table: dict[str, list[int]] = {}
+        for ot, oid in refs:
+            if ot in ("um_facts", "um_edges"):
+                by_table.setdefault(ot, []).append(oid)
+        for ot, oids in by_table.items():
+            ph = ",".join("?" * len(oids))
+            for oid, vu in self.conn.execute(
+                    f"SELECT id, valid_until FROM {ot} WHERE id IN ({ph})", oids):
+                out[(ot, oid)] = float(vu or 0.0)
+        return out
+
+    @_locked
+    def row_meta(self, owner_table: str, owner_id: int) -> dict:
+        """Версионные поля для mem_expand (fact/edge)."""
+        if owner_table == "um_facts":
+            r = self.conn.execute(
+                "SELECT valid_until, superseded_by FROM um_facts WHERE id=?",
+                (owner_id,)).fetchone()
+            return {"valid_until": float(r[0]), "superseded_by": int(r[1])} if r else {}
+        if owner_table == "um_edges":
+            r = self.conn.execute(
+                "SELECT valid_until FROM um_edges WHERE id=?", (owner_id,)).fetchone()
+            return {"valid_until": float(r[0])} if r else {}
+        return {}
 
     @_locked
     def add_summary(self, session_id: str, body: str, depth: int = 0,
@@ -419,7 +618,8 @@ class Store:
     @_locked
     def fts_search(self, query: str, scope: str = "all",
                    session_id: str = "", limit: int = 20,
-                   owner: str = "") -> list[Hit]:
+                   owner: str = "",
+                   include_expired: bool = False) -> list[Hit]:
         """Полнотекст: FTS5 при наличии, иначе LIKE по токенам.
 
         Trigram-FTS не ищет термы короче 3 символов («да», «он») — для таких
@@ -447,9 +647,16 @@ class Store:
                 rows = []
             cand = [(ot, oid) for ot, oid in rows if ot in tables]
             owners = self.owners_for(cand) if owner else {}
+            expired: set = set()
+            if not include_expired:
+                now = time.time()
+                expired = {k for k, vu in self.validity_for(cand).items()
+                           if vu != 0 and vu <= now}
             hits = []
             for ot, oid in cand:
                 if owner and owners.get((ot, oid), "") != owner:
+                    continue
+                if (ot, oid) in expired:
                     continue
                 body, sid = self._body_of(ot, oid)
                 if body is None:
@@ -476,6 +683,9 @@ class Store:
                 if scope == "session":
                     cond = f"(e.session_id=?) AND ({cond})"
                     params = [session_id] + params
+                if not include_expired:
+                    cond = f"(e.valid_until=0 OR e.valid_until>?) AND ({cond})"
+                    params = [time.time()] + params
                 rows = self.conn.execute(
                     """SELECT e.id FROM um_edges e
                        JOIN um_entities s ON s.id = e.subject_id
@@ -495,6 +705,9 @@ class Store:
             if ot == "um_messages" and scope == "session":
                 cond = f"(session_id=?) AND ({cond})"
                 params = [session_id] + params
+            if ot == "um_facts" and not include_expired:
+                cond = f"(valid_until=0 OR valid_until>?) AND ({cond})"
+                params = [time.time()] + params
             idcol = "id"
             for r in self.conn.execute(
                     f"SELECT {idcol}, {col} FROM {ot} WHERE {cond} LIMIT ?", (*params, limit)):
@@ -915,7 +1128,8 @@ class Store:
 
     @_locked
     def neighbors(self, entity_name: str, session_id: str = "",
-                  limit: int = 100, owner: str = "") -> list[dict]:
+                  limit: int = 100, owner: str = "",
+                  include_expired: bool = False) -> list[dict]:
         key = entity_name.strip().lower()
         q = "SELECT id FROM um_entities WHERE name=?"
         params: list = [key]
@@ -938,6 +1152,9 @@ class Store:
         if owner:
             q += " AND e.owner = ?"
             params.append(owner)
+        if not include_expired:
+            q += " AND (e.valid_until = 0 OR e.valid_until > ?)"
+            params.append(time.time())
         q += " LIMIT ?"
         params.append(limit)
         rows = self.conn.execute(q, params).fetchall()

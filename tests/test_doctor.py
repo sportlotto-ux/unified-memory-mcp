@@ -87,6 +87,7 @@ def test_doctor_modes_server(tmp_path, monkeypatch):
     monkeypatch.setenv("UM_DATABASE_PATH", str(db))
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("UM_EMBEDDING_BACKEND", "local")
+    monkeypatch.setattr(srv, "_backend", lambda cfg: None)  # FTS-only: без загрузки модели
     srv._STATE.update(ingest=None, store=None, cfg=None, backend_error=None)
     try:
         import json

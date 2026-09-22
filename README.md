@@ -64,12 +64,13 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 }
 ```
 
-## Тулы (11)
+## Тулы (12)
 
 | Тул | Что делает |
 |---|---|
 | `mem_remember` | Сохранить сообщение; авто-компакшн при превышении порога давления |
-| `mem_fact` | Сохранить долгий факт + опциональный триплет графа (`subject`, `predicate`, `object`) |
+| `mem_fact` | Слот-факт (одно живое значение на `owner/category/name`) + опциональный триплет графа; то же тело — no-op, новое — supersede с историей |
+| `mem_update` | Правка факта по id (новая версия, history живёт) или истечение/reopen факта/ребра (`valid_until`) |
 | `mem_recall` | Единый поиск: FTS + вектора + граф (1-hop) + RRF. `scope`: `all`/`session`/`facts` |
 | `mem_expand` | Дословно по `kind`+`id`, единая схема `{kind,id,body}` |
 | `mem_reindex` | Доложит недостающие вектора (лестница после смены модели) |
@@ -88,6 +89,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 - **Сжатие:** давление = токены сессии vs `UM_CONTEXT_TOKENS × UM_COMPACT_THRESHOLD` (дефолт 200k × 0.35, как LCM). Накрыло → старые (всё кроме `UM_FRESH_TAIL_COUNT` свежих) в summary depth 0; каждые `UM_DAG_FANIN` нод уровня схлопываются в уровень выше. Frontier в `um_meta` — каждое сообщение жмётся один раз. `mem_assemble` собирает bounded контекст под бюджет.
 - **Защита от старых болячек:** нет жёсткого `importance: 0.95` (причина canonical-bloat в mnemosyne) — кап `0..1`; смена embedding-модели без reindex — громкая ошибка, а не тихая деградация recall.
 - **Redaction:** гейт на входе (`UM_REDACT_ENABLED`, дефолт ON): `api_key,bearer_token,password_assignment,private_key` — каталог и регулярки как у LCM. Режется до SQLite/FTS/vectors/summaries, плейсхолдер `[UM redaction: name=...; chars=N]` необратим. Forward-only: что попало в стор раньше — чистить руками + reindex.
+- **Факты = слоты (`mem_fact`), сообщения = лог (`mem_remember`).** Один живой факт на `(owner, category, name)` — гарантирует partial unique index, не код. Новое тело вытесняет старое (`valid_until`, `superseded_by`), история lossless; `valid_until=0` = живое (sentinel). `mem_recall`/`mem_expand` прячут истёкшее (`include_expired=True` — аудит). `mem_forget` — жёсткое удаление, истечение — только `mem_update`.
 
 ## Переменные окружения
 
@@ -121,7 +123,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 ## Разработка
 
 ```bash
-python -m pytest tests/ -q   # 109 passed, 4 skipped без fastembed/vec; UM_LIVE_OPENAI=1 — live против 8127
+python -m pytest tests/ -q   # 127 passed, 4 skipped без fastembed/vec; UM_LIVE_OPENAI=1 — live против 8127
 ```
 
 Прогон герметичен: `tests/conftest.py` снимает ambient `UM_*` (иначе шелл с
