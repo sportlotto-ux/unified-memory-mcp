@@ -12,6 +12,7 @@ import sqlite3
 import struct
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -250,6 +251,7 @@ class Store:
         cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._db_path = str(cfg.db_path)
         self._lock = threading.RLock()
+        self._sp_stack: list[str] = []  # стек активных savepoint'ов (batch/dry-run)
         self.conn = sqlite3.connect(str(cfg.db_path), check_same_thread=False)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA busy_timeout=10000")
@@ -351,8 +353,55 @@ class Store:
         self.conn.commit()
         return cur.rowcount
 
+    # -- транзакционное ядро (v0.7-п.5) -----------------------------------
+    def _commit_if(self, commit: bool) -> None:
+        """Коммит, если вызов не находится внутри batch-транзакции (_commit=False)."""
+        if commit:
+            self.conn.commit()
+
+    def _abort(self) -> None:
+        """Откат текущей операции: до активного savepoint'а (batch), иначе rollback."""
+        if self._sp_stack:
+            self.conn.execute(f"ROLLBACK TO SAVEPOINT {self._sp_stack[-1]}")
+        else:
+            self.conn.rollback()
+
+    @contextmanager
+    def savepoint(self, name: str = "um_op"):
+        """Вложенный savepoint вокруг одной операции: ошибка откатывает ТОЛЬКО её."""
+        if self._sp_stack:
+            name = f"{name}_{len(self._sp_stack)}"
+        self.conn.execute(f"SAVEPOINT {name}")
+        self._sp_stack.append(name)
+        try:
+            yield
+        except Exception:
+            self.conn.execute(f"ROLLBACK TO SAVEPOINT {name}")
+            self.conn.execute(f"RELEASE SAVEPOINT {name}")
+            self._sp_stack.pop()
+            raise
+        self.conn.execute(f"RELEASE SAVEPOINT {name}")
+        self._sp_stack.pop()
+
+    @contextmanager
+    def transaction(self, dry_run: bool = False):
+        """Одношовный batch-контур: RELEASE коммитит, dry_run/ошибка — ROLLBACK.
+        Внутренние write-методы вызываются с _commit=False (иначе commit внутри
+        разрывает контур: это и есть критический guardrail п.5)."""
+        name = "um_batch"
+        self.conn.execute(f"SAVEPOINT {name}")
+        ok = False
+        try:
+            yield
+            ok = True
+        finally:
+            if dry_run or not ok:
+                self.conn.execute(f"ROLLBACK TO SAVEPOINT {name}")
+            self.conn.execute(f"RELEASE SAVEPOINT {name}")
+
     @_locked
-    def bump_tokens(self, session_id: str, delta: int, owner: str = "") -> None:
+    def bump_tokens(self, session_id: str, delta: int, owner: str = "",
+                    _commit: bool = True) -> None:
         """#3: инкрементный счётчик давления. Вызывать из locked-контекста."""
         key = f"tokens:{owner}:{session_id}" if owner else f"tokens:{session_id}"
         self.conn.execute(
@@ -360,7 +409,7 @@ class Store:
             " ON CONFLICT(key) DO UPDATE"
             " SET value=CAST(value AS INTEGER)+CAST(excluded.value AS INTEGER)",
             (key, str(delta)))
-        self.conn.commit()
+        self._commit_if(_commit)
 
     @_locked
     def meta_set(self, key: str, value: str) -> None:
@@ -372,7 +421,8 @@ class Store:
     # -- writes -----------------------------------------------------------
     @_locked
     def add_message(self, session_id: str, role: str, content: str,
-                    source: str = "unknown", owner: str = "") -> int:
+                    source: str = "unknown", owner: str = "",
+                    _commit: bool = True) -> int:
         cur = self.conn.execute(
             "INSERT INTO um_messages(session_id, owner, role, content, created_at, source)"
             " VALUES(?,?,?,?,?,?)",
@@ -380,25 +430,29 @@ class Store:
         )
         mid = cur.lastrowid
         self._fts_index("um_messages", mid, content)
-        self.bump_tokens(session_id, estimate_tokens(content), owner)
-        self.conn.commit()
+        self.bump_tokens(session_id, estimate_tokens(content), owner, _commit=False)
+        self._commit_if(_commit)
         return mid
 
     @_locked
     def add_fact(self, category: str, name: str, body: str,
-                 importance: float = 0.5, owner: str = "") -> int:
+                 importance: float = 0.5, owner: str = "",
+                 _commit: bool = True) -> int:
         """Слот-запись: то же тело — no-op, новое — supersede-цепочка. Возвращает id живого."""
-        return self._upsert_fact(category, name, body, importance, owner)["id"]
+        return self._upsert_fact(category, name, body, importance, owner,
+                                 _commit=_commit)["id"]
 
     @_locked
     def add_fact_ex(self, category: str, name: str, body: str,
-                    importance: float = 0.5, owner: str = "") -> dict:
+                    importance: float = 0.5, owner: str = "",
+                    _commit: bool = True) -> dict:
         """Слот-запись с полным статусом: {id, status, superseded_id}."""
-        return self._upsert_fact(category, name, body, importance, owner)
+        return self._upsert_fact(category, name, body, importance, owner,
+                                 _commit=_commit)
 
     def _upsert_fact(self, category: str, name: str, body: str,
                      importance: float, owner: str = "",
-                     _depth: int = 0) -> dict:
+                     _depth: int = 0, _commit: bool = True) -> dict:
         """Ядро слот-семантики (v0.5). Без лока — из locked-контекста.
 
         Живой слот = (owner, category, name, valid_until=0); partial unique index
@@ -417,7 +471,7 @@ class Store:
                     self.conn.execute(
                         "UPDATE um_facts SET importance=?, updated_at=? WHERE id=?",
                         (importance, now, fid))
-                    self.conn.commit()
+                    self._commit_if(_commit)
                     return {"id": fid, "status": "updated", "superseded_id": 0}
                 return {"id": fid, "status": "noop", "superseded_id": 0}
             # Expire-then-insert: partial unique index не пустит новый живой
@@ -432,11 +486,11 @@ class Store:
                     " VALUES(?,?,?,?,?,?,?,0,0)",
                     (owner, category, name, body, importance, now, now))
             except sqlite3.IntegrityError:
-                self.conn.rollback()
+                self._abort()
                 if _depth >= 1:
                     raise
                 return self._upsert_fact(category, name, body, importance, owner,
-                                         _depth + 1)
+                                         _depth + 1, _commit=_commit)
             nid = cur.lastrowid
             self.conn.execute(
                 "UPDATE um_facts SET superseded_by=? WHERE id=?", (nid, fid))
@@ -445,7 +499,7 @@ class Store:
                 "UPDATE um_edges SET valid_until=? WHERE fact_id=? AND valid_until=0",
                 (now, fid))
             self._fts_index("um_facts", nid, f"{name} {body}")
-            self.conn.commit()
+            self._commit_if(_commit)
             return {"id": nid, "status": "superseded", "superseded_id": fid}
         try:
             cur = self.conn.execute(
@@ -455,21 +509,21 @@ class Store:
                 (owner, category, name, body, importance, now, now))
         except sqlite3.IntegrityError:
             # backstop: слот занят вне этого процесса — перечитать и свести
-            self.conn.rollback()
+            self._abort()
             if _depth >= 1:
                 raise
             return self._upsert_fact(category, name, body, importance, owner,
-                                     _depth + 1)
+                                     _depth + 1, _commit=_commit)
         fid = cur.lastrowid
         self._fts_index("um_facts", fid, f"{name} {body}")
-        self.conn.commit()
+        self._commit_if(_commit)
         return {"id": fid, "status": "created", "superseded_id": 0}
 
     @_locked
     def update_fact(self, fid: int, body: str | None = None,
                     importance: float | None = None,
                     valid_until: float | None = None,
-                    owner: str = "") -> dict | None:
+                    owner: str = "", _commit: bool = True) -> dict | None:
         """Правка факта по id без потери provenance.
 
         Сначала valid_until in-place (0 = reopen + возврат рёбер факта), затем
@@ -511,12 +565,12 @@ class Store:
                 self.conn.execute(
                     "UPDATE um_edges SET valid_until=?"
                     " WHERE fact_id=? AND valid_until=0", (vu, fid))
-                self.conn.commit()
+                self._commit_if(_commit)
                 if body is not None and body != cur_body:
                     raise ValueError(
                         "cannot edit while expiring; reopen with valid_until=0 first")
                 return {"id": fid, "status": "expired", "superseded_id": 0}
-            self.conn.commit()
+            self._commit_if(_commit)
         # здесь факт живой (возможно, только что reopened) — правим body/importance
         if body is not None and body != cur_body:
             if cur_vu > 0:
@@ -524,19 +578,21 @@ class Store:
                     "cannot edit expired fact; reopen with valid_until=0 first")
             return self._upsert_fact(
                 cat, name, body,
-                importance if importance is not None else cur_imp, r_owner)
+                importance if importance is not None else cur_imp, r_owner,
+                _commit=_commit)
         if importance is not None and abs(importance - cur_imp) > 1e-9:
             self.conn.execute(
                 "UPDATE um_facts SET importance=?, updated_at=? WHERE id=?",
                 (max(0.0, min(1.0, importance)), time.time(), fid))
-            self.conn.commit()
+            self._commit_if(_commit)
             return {"id": fid, "status": "updated", "superseded_id": 0}
         if reopened:
             return {"id": fid, "status": "reopened", "superseded_id": 0}
         return {"id": fid, "status": "noop", "superseded_id": 0}
 
     @_locked
-    def update_edge(self, eid: int, valid_until: float, owner: str = "") -> bool:
+    def update_edge(self, eid: int, valid_until: float, owner: str = "",
+                    _commit: bool = True) -> bool:
         """Истечение/reopen ребра (mnemosyne triple_end). Замена = новое ребро."""
         row = self.conn.execute(
             "SELECT owner FROM um_edges WHERE id=?", (eid,)).fetchone()
@@ -546,7 +602,7 @@ class Store:
             return False
         self.conn.execute("UPDATE um_edges SET valid_until=? WHERE id=?",
                           (float(valid_until), eid))
-        self.conn.commit()
+        self._commit_if(_commit)
         return True
 
     def _dedupe_live_slots(self) -> None:
@@ -864,7 +920,8 @@ class Store:
         return [(ot, oid, unpack_vector(b)) for ot, oid, b in self.conn.execute(q, params)]
 
     @_locked
-    def delete_fact(self, fid: int, owner: str = "") -> bool:
+    def delete_fact(self, fid: int, owner: str = "",
+                    _commit: bool = True) -> bool:
         if owner:
             row = self.conn.execute(
                 "SELECT owner FROM um_facts WHERE id=?", (fid,)).fetchone()
@@ -893,7 +950,7 @@ class Store:
         self.conn.execute(
             """DELETE FROM um_vectors WHERE owner_table='um_entities' AND owner_id NOT IN
                (SELECT id FROM um_entities)""")
-        self.conn.commit()
+        self._commit_if(_commit)
         return cur.rowcount > 0
 
     @_locked
@@ -1229,7 +1286,8 @@ class Store:
                 pass  # индекса нет — нечего чистить
 
     @_locked
-    def delete_edge(self, eid: int, owner: str = "") -> bool:
+    def delete_edge(self, eid: int, owner: str = "",
+                    _commit: bool = True) -> bool:
         """Прямое удаление ребра — закрывает дыру бессмертных fact_id=0 (#3)."""
         row = self.conn.execute(
             "SELECT owner FROM um_edges WHERE id=?", (eid,)).fetchone()
@@ -1239,11 +1297,12 @@ class Store:
             return False
         self._drop_edge_rows(eid)
         self._prune_orphan_entities()
-        self.conn.commit()
+        self._commit_if(_commit)
         return True
 
     @_locked
-    def delete_entity(self, name: str, owner: str = "") -> bool:
+    def delete_entity(self, name: str, owner: str = "",
+                      _commit: bool = True) -> bool:
         """Удалить сущность + все её рёбра каскадом."""
         key = name.strip().lower()
         q = "SELECT id FROM um_entities WHERE name=?"
@@ -1265,12 +1324,13 @@ class Store:
             "DELETE FROM um_vectors WHERE owner_table='um_entities' AND owner_id=?",
             (ent_id,))
         self._prune_orphan_entities()
-        self.conn.commit()
+        self._commit_if(_commit)
         return True
 
     # -- graph ----------------------------------------------------------
     @_locked
-    def add_entity(self, name: str, owner: str = "") -> int:
+    def add_entity(self, name: str, owner: str = "",
+                   _commit: bool = True) -> int:
         import time as _t
         key = name.strip().lower()
         row = self.conn.execute(
@@ -1280,28 +1340,29 @@ class Store:
         cur = self.conn.execute(
             "INSERT INTO um_entities(name, display, created_at, owner) VALUES(?,?,?,?)",
             (key, name.strip(), _t.time(), owner))
-        self.conn.commit()
+        self._commit_if(_commit)
         return cur.lastrowid
 
     @_locked
     def add_edge(self, subject: str, predicate: str, obj: str,
-                 session_id: str = "", fact_id: int = 0, owner: str = "") -> int:
+                 session_id: str = "", fact_id: int = 0, owner: str = "",
+                 _commit: bool = True) -> int:
         import time as _t
-        sid = self.add_entity(subject, owner)
-        oid = self.add_entity(obj, owner)
+        sid = self.add_entity(subject, owner, _commit=False)
+        oid = self.add_entity(obj, owner, _commit=False)
         cur = self.conn.execute(
             "INSERT INTO um_edges(subject_id, predicate, object_id, session_id,"
             " fact_id, created_at, owner) VALUES(?,?,?,?,?,?,?)",
             (sid, predicate.strip().lower(), oid, session_id, fact_id, _t.time(), owner))
         eid = cur.lastrowid
         self._fts_index("um_edges", eid, f"{subject} {predicate} {obj}")
-        self.conn.commit()
+        self._commit_if(_commit)
         return eid
 
     @_locked
     def link(self, src_table: str, src_id: int, dst_table: str, dst_id: int,
              rel: str, weight: float = 1.0, session_id: str = "",
-             owner: str = "") -> dict:
+             owner: str = "", _commit: bool = True) -> dict:
         """Типизированная связь (ADR-001). D4: оба конца существуют и owner-совпадают.
         D3: повторный вызов для живого (src,dst,rel,owner) — no-op, отдаёт тот же id.
         session_id наследуется от вызова (у концов сессии могут различаться)."""
@@ -1338,7 +1399,7 @@ class Store:
                 (src_table, src_id, dst_table, dst_id, rel, weight, owner,
                  session_id, _t.time()))
             lid = cur.lastrowid
-            self.conn.commit()
+            self._commit_if(_commit)
         except sqlite3.IntegrityError:
             # гонка: связь создали между SELECT и INSERT
             row = self.conn.execute(
@@ -1352,7 +1413,8 @@ class Store:
                 "src": f"{src_table}:{src_id}", "dst": f"{dst_table}:{dst_id}"}
 
     @_locked
-    def update_link(self, lid: int, valid_until: float, owner: str = "") -> bool:
+    def update_link(self, lid: int, valid_until: float, owner: str = "",
+                    _commit: bool = True) -> bool:
         """Истечение/reopen связи (зеркало update_edge, ADR-001 D6).
         Замена связи = новая связь; rel не редактируется."""
         row = self.conn.execute(
@@ -1363,11 +1425,12 @@ class Store:
             return False
         self.conn.execute("UPDATE um_links SET valid_until=? WHERE id=?",
                           (float(valid_until), lid))
-        self.conn.commit()
+        self._commit_if(_commit)
         return True
 
     @_locked
-    def delete_link(self, lid: int, owner: str = "") -> bool:
+    def delete_link(self, lid: int, owner: str = "",
+                    _commit: bool = True) -> bool:
         """Жёсткое удаление связи (симметрично GDPR-hatch фактов/рёбер)."""
         row = self.conn.execute(
             "SELECT owner FROM um_links WHERE id=?", (lid,)).fetchone()
@@ -1376,7 +1439,7 @@ class Store:
         if owner and (row[0] or "") != owner:
             return False
         self.conn.execute("DELETE FROM um_links WHERE id=?", (lid,))
-        self.conn.commit()
+        self._commit_if(_commit)
         return True
 
     @_locked
