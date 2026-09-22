@@ -2,3 +2,6 @@ __pycache__/
 .pytest_cache/
 *.db*
 .serena/
+
+# local secret (never commit)
+key.api
