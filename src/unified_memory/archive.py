@@ -93,20 +93,6 @@ def fetch_message(conn: sqlite3.Connection, mid: int) -> dict | None:
                      "created_at", "source"], r))
 
 
-def search(conn: sqlite3.Connection, terms: list[str], limit: int = 20) -> list[dict]:
-    """LIKE-поиск по архиву (для include_archived)."""
-    terms = [t for t in terms if t]
-    if not terms:
-        return []
-    cond = " OR ".join(["content LIKE ?"] * len(terms))
-    params = [f"%{t}%" for t in terms]
-    rows = conn.execute(
-        f"SELECT id, session_id, content, created_at FROM ar_messages"
-        f" WHERE {cond} ORDER BY created_at DESC LIMIT ?", (*params, limit)).fetchall()
-    return [{"id": r[0], "session_id": r[1], "content": r[2], "created_at": r[3]}
-            for r in rows]
-
-
 def status(conn: sqlite3.Connection, path) -> dict:
     p = Path(path)
     return {

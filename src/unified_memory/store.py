@@ -760,17 +760,15 @@ class Store:
 
     @_locked
     def session_messages(self, session_id: str, after_id: int = 0,
-                         limit: int = 50, owner: str = "",
-                         include_archived: bool = False) -> list[dict]:
+                         limit: int = 50, owner: str = "") -> list[dict]:
         q = ("SELECT id, session_id, role, content, created_at, source FROM um_messages"
              " WHERE session_id=? AND id>?")
         params: list = [session_id, after_id]
         if owner:
             q += " AND owner=?"
             params.append(owner)
-        if not include_archived:
-            # заглушки [archived] не должны попадать в контекст/компакшн
-            q += " AND (externalized_ref IS NULL OR externalized_ref='')"
+        # заглушки [archived] не должны попадать в контекст/компакшн
+        q += " AND (externalized_ref IS NULL OR externalized_ref='')"
         rows = self.conn.execute(q + " ORDER BY id LIMIT ?", (*params, limit)).fetchall()
         keys = ["id", "session_id", "role", "content", "created_at", "source"]
         return [dict(zip(keys, r)) for r in rows]
@@ -1053,8 +1051,7 @@ class Store:
 
     @_locked
     def recent(self, start_ts: float, end_ts: float, session_id: str = "",
-               owner: str = "", limit: int = 20,
-               include_archived: bool = False) -> list[dict]:
+               owner: str = "", limit: int = 20) -> list[dict]:
         """Temporal выборка поверх messages+summaries: [start, end), свежие first."""
         out: list[dict] = []
         mq = ("SELECT id, session_id, content, created_at FROM um_messages"
@@ -1066,8 +1063,7 @@ class Store:
         if owner:
             mq += " AND owner=?"
             mp.append(owner)
-        if not include_archived:
-            mq += " AND (externalized_ref IS NULL OR externalized_ref='')"
+        mq += " AND (externalized_ref IS NULL OR externalized_ref='')"
         for mid, sid, body, ts in self.conn.execute(
                 mq + " ORDER BY created_at DESC, id DESC LIMIT ?", (*mp, limit)):
             out.append({"kind": "um_messages", "id": mid, "session_id": sid,
