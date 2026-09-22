@@ -6,7 +6,9 @@ Lossless по умолчанию: compact пишет summaries, сырые со�
 
 from __future__ import annotations
 
+from .config import Config
 from .embeddings import EmbeddingBackend
+from .engine import ActiveWindow
 from .recall import Router
 from .store import Store
 from .summarize import Summarizer
@@ -14,19 +16,21 @@ from .summarize import Summarizer
 
 class Ingest:
     def __init__(self, store: Store, backend: EmbeddingBackend | None = None,
-                 summarizer: Summarizer | None = None) -> None:
+                 summarizer: Summarizer | None = None,
+                 cfg: Config | None = None) -> None:
         self.store = store
         self.backend = backend
         self.summarizer = summarizer
+        self.window = ActiveWindow(store, summarizer, cfg or Config())
 
     def remember_message(self, session_id: str, role: str, content: str,
-                         source: str = "mcp") -> int:
+                         source: str = "mcp") -> dict:
         mid = self.store.add_message(session_id, role, content, source)
         if self.backend is not None:
             self.store.add_vector("um_messages", mid,
                                   self.backend.embed_docs([content])[0],
                                   self.backend.spec.name)
-        return mid
+        return {"id": mid, "compaction": self.window.maybe_compact(session_id)}
 
     def remember_fact(self, category: str, name: str, body: str,
                       importance: float = 0.5, subject: str = "",

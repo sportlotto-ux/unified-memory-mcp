@@ -44,11 +44,12 @@ export UM_SUMMARIZER_MODEL=qwen3:8b
 
 | Тул | Что делает |
 |---|---|
-| `mem_remember` | Сохранить сообщение сессии (`session_id`, `role`, `content`) |
+| `mem_remember` | Сохранить сообщение; авто-компакшн при превышении порога давления |
 | `mem_fact` | Сохранить долгий факт + опциональный триплет графа (`subject`, `predicate`, `object`) |
 | `mem_recall` | Единый поиск: FTS + вектора + граф (1-hop) + RRF. `scope`: `all`/`session`/`facts` |
 | `mem_expand` | Дословно по `kind`+`id` (`message`/`fact`/`summary`/`edge`) |
-| `mem_compact` | Сжать старые сообщения сессии в summary. **Сырьё остаётся** (lossless) |
+| `mem_compact` | Ручное сжатие старых сообщений (сырьё остаётся) |
+| `mem_assemble` | Bounded активный контекст: summaries + свежий хвост в бюджет токенов |
 | `mem_forget` | Удалить факт по id |
 | `mem_status` | Счётчики + флаги деградации (`vectors_enabled`, `summarizer`, `fts`) |
 | `mem_doctor` | `integrity_check`, вектора по моделям |
@@ -58,7 +59,7 @@ export UM_SUMMARIZER_MODEL=qwen3:8b
 - **Хранение:** одна SQLite (WAL): `um_messages` + `um_summaries` (DAG) + `um_facts` + `um_entities`/`um_edges` (граф) + `um_vectors` + `um_meta`.
 - **Эмбеддинги:** дефолт репо — полная `paraphrase-multilingual-mpnet-base-v2` (768, не дистиллят). Для лёгких стендов — дистиллированная MiniLM-L12 через `UM_EMBEDDING_MODEL` (так стоит у автора в Hermes).
 - **Поиск:** FTS5 (fallback LIKE) + cosine по векторам + RRF. Без fastembed — честный FTS-режим, `mem_status` так и скажет (`vectors_enabled: false`), молчаливого «вроде ищет» нет.
-- **Сжатие:** `mem_compact(session, keep_tail=20)` — старые сообщения в summary-ноду с покрытием `covers_from/to`. Пересказ — LLM-endpoint, если задан; иначе детерминированная extractive-конденсация (без галлюцинаций, но и без пересказа — `mem_status` показывает какой).
+- **Сжатие:** давление = токены сессии vs `UM_CONTEXT_TOKENS × UM_COMPACT_THRESHOLD` (дефолт 200k × 0.35, как LCM). Накрыло → старые (всё кроме `UM_FRESH_TAIL_COUNT` свежих) в summary depth 0; каждые `UM_DAG_FANIN` нод уровня схлопываются в уровень выше. Frontier в `um_meta` — каждое сообщение жмётся один раз. `mem_assemble` собирает bounded контекст под бюджет.
 - **Защита от старых болячек:** нет жёсткого `importance: 0.95` (причина canonical-bloat в mnemosyne) — кап `0..1`; смена embedding-модели без reindex — громкая ошибка, а не тихая деградация recall.
 
 ## Переменные окружения
@@ -69,6 +70,11 @@ export UM_SUMMARIZER_MODEL=qwen3:8b
 | `UM_EMBEDDING_MODEL` | `paraphrase-multilingual-mpnet-base-v2` (768) | Модель fastembed строго из реестра |
 | `UM_SUMMARIZER_URL` / `UM_SUMMARIZER_MODEL` | — | LLM-пересказ; без них extractive |
 | `UM_SUMMARIZER_API_KEY` | — | Bearer для endpoint |
+| `UM_CONTEXT_TOKENS` | `200000` | Эффективное окно хоста |
+| `UM_COMPACT_THRESHOLD` | `0.35` | Доля окна — триггер компакшна |
+| `UM_FRESH_TAIL_COUNT` | `20` | Свежих сообщений не жмём никогда |
+| `UM_DAG_FANIN` | `5` | Нод уровня → одна выше |
+| `UM_ASSEMBLY_BUDGET` | `8000` | Токенов в `mem_assemble` по дефолту |
 
 ## Разработка
 

@@ -164,9 +164,17 @@ class Store:
 
     # -- meta -------------------------------------------------------------
     @_locked
+    @_locked
     def meta_get(self, key: str) -> str | None:
         row = self.conn.execute("SELECT value FROM um_meta WHERE key=?", (key,)).fetchone()
         return row[0] if row else None
+
+    @_locked
+    def meta_set(self, key: str, value: str) -> None:
+        self.conn.execute(
+            "INSERT INTO um_meta(key, value) VALUES(?,?)"
+            " ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+        self.conn.commit()
 
     # -- writes -----------------------------------------------------------
     @_locked

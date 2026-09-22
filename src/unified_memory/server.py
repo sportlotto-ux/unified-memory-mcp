@@ -44,14 +44,14 @@ _CFG = load()
 _STORE = Store(_CFG,
                embedding_dim=_BACKEND.dim if _BACKEND else 0,
                embedding_model=_CFG.embedding_model if _BACKEND else "")
-_INGEST = Ingest(_STORE, _BACKEND, default_summarizer())
+_INGEST = Ingest(_STORE, _BACKEND, default_summarizer(), _CFG)
 
 
 @mcp.tool()
 def mem_remember(session_id: str = "default", role: str = "user",
                  content: str = "") -> str:
-    """Save a session message. Returns its id."""
-    return json.dumps({"id": _INGEST.remember_message(session_id, role, content)})
+    """Save a session message. Auto-compacts past the pressure threshold."""
+    return json.dumps(_INGEST.remember_message(session_id, role, content))
 
 
 @mcp.tool()
@@ -89,6 +89,13 @@ def mem_expand(kind: str, id: int) -> str:
 def mem_compact(session_id: str, keep_tail: int = 20) -> str:
     """Summarize old session messages. Raw messages are kept (lossless)."""
     return json.dumps(_INGEST.compact_session(session_id, keep_tail))
+
+
+@mcp.tool()
+def mem_assemble(session_id: str, budget: int = 0) -> str:
+    """Bounded active context: ready summaries + fresh tail within budget."""
+    return json.dumps(_INGEST.window.assemble(session_id, budget),
+                      ensure_ascii=False)
 
 
 @mcp.tool()
