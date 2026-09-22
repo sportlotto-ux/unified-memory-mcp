@@ -66,26 +66,28 @@ def _store():
 
 @mcp.tool()
 def mem_remember(session_id: str = "default", role: str = "user",
-                 content: str = "") -> str:
+                 content: str = "", owner: str = "") -> str:
     """Save a session message. Auto-compacts past the pressure threshold."""
-    return json.dumps(_ingest().remember_message(session_id, role, content))
+    return json.dumps(_ingest().remember_message(session_id, role, content,
+                                                 owner=owner))
 
 
 @mcp.tool()
 def mem_fact(category: str, name: str, body: str,
              importance: float = 0.5, subject: str = "",
              predicate: str = "", object: str = "",
-             session_id: str = "") -> str:
+             session_id: str = "", owner: str = "") -> str:
     """Save a long-term fact, optionally with a graph triple. Returns its id."""
     return json.dumps({"id": _ingest().remember_fact(
-        category, name, body, importance, subject, predicate, object, session_id)})
+        category, name, body, importance, subject, predicate, object,
+        session_id, owner)})
 
 
 @mcp.tool()
 def mem_recall(query: str, scope: str = "all", session_id: str = "",
-               limit: int = 10) -> str:
+               limit: int = 10, owner: str = "") -> str:
     """Unified search: FTS + vectors + RRF. Scope: all | session | facts."""
-    hits = _ingest().router().recall(query, scope, session_id, limit)
+    hits = _ingest().router().recall(query, scope, session_id, limit, owner)
     out = []
     for h in hits:
         body = h.body[:2000]
@@ -98,10 +100,10 @@ def mem_recall(query: str, scope: str = "all", session_id: str = "",
 
 
 @mcp.tool()
-def mem_expand(kind: str, id: int) -> str:
+def mem_expand(kind: str, id: int, owner: str = "") -> str:
     """Verbatim fetch. kind: message | fact | summary | edge. Uniform schema."""
     if kind == "message":
-        msg = _store().get_message(int(id))
+        msg = _store().get_message(int(id), owner)
         return json.dumps({"kind": kind, "id": int(id),
                            "body": msg["content"] if msg else None},
                           ensure_ascii=False)
@@ -109,25 +111,28 @@ def mem_expand(kind: str, id: int) -> str:
              "edge": "um_edges"}.get(kind)
     if table is None:
         raise ValueError(f"unknown kind {kind!r}: message | fact | summary | edge")
+    if owner and _store().owners_for([(table, int(id))]).get((table, int(id)), "") != owner:
+        return json.dumps({"kind": kind, "id": int(id), "body": None}, ensure_ascii=False)
     body, _ = _store()._body_of(table, int(id))
     return json.dumps({"kind": kind, "id": int(id), "body": body}, ensure_ascii=False)
 
 
 @mcp.tool()
-def mem_compact(session_id: str, keep_tail: int = 20) -> str:
+def mem_compact(session_id: str, keep_tail: int = 20, owner: str = "") -> str:
     """Summarize old session messages. Raw messages are kept (lossless)."""
-    return json.dumps(_ingest().compact_session(session_id, keep_tail))
+    return json.dumps(_ingest().compact_session(session_id, keep_tail,
+                                                owner=owner))
 
 
 @mcp.tool()
-def mem_assemble(session_id: str, budget: int = 0) -> str:
+def mem_assemble(session_id: str, budget: int = 0, owner: str = "") -> str:
     """Bounded active context: ready summaries + fresh tail within budget."""
-    return json.dumps(_ingest().window.assemble(session_id, budget),
+    return json.dumps(_ingest().window.assemble(session_id, budget, owner),
                       ensure_ascii=False)
 
 
 @mcp.tool()
-def mem_forget(id: str = "", kind: str = "fact") -> str:
+def mem_forget(id: str = "", kind: str = "fact", owner: str = "") -> str:
     """Delete by kind: fact (numeric id), edge (numeric id), entity (name)."""
     if kind in ("fact", "edge"):
         try:
@@ -135,19 +140,19 @@ def mem_forget(id: str = "", kind: str = "fact") -> str:
         except (TypeError, ValueError):
             raise ValueError(f"kind={kind!r} needs a numeric id, got {id!r}")
         if kind == "fact":
-            return json.dumps({"deleted": _store().delete_fact(oid)})
-        return json.dumps({"deleted": _store().delete_edge(oid)})
+            return json.dumps({"deleted": _store().delete_fact(oid, owner)})
+        return json.dumps({"deleted": _store().delete_edge(oid, owner)})
     if kind == "entity":
         if not (id or "").strip():
             raise ValueError("kind='entity' needs a name")
-        return json.dumps({"deleted": _store().delete_entity(id)})
+        return json.dumps({"deleted": _store().delete_entity(id, owner)})
     raise ValueError(f"unknown kind {kind!r}: fact | edge | entity")
 
 
 @mcp.tool()
-def mem_reindex() -> str:
+def mem_reindex(owner: str = "") -> str:
     """Embed owners missing vectors (ladder after a model change). Idempotent."""
-    return json.dumps(_ingest().reindex())
+    return json.dumps(_ingest().reindex(owner=owner))
 
 
 @mcp.tool()

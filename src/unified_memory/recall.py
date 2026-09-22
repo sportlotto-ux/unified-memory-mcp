@@ -48,7 +48,7 @@ class Router:
         return self.backend is not None
 
     def recall(self, query: str, scope: str = "all", session_id: str = "",
-               limit: int = 10) -> list[Hit]:
+               limit: int = 10, owner: str = "") -> list[Hit]:
         if scope not in VALID_SCOPES:
             raise ValueError(f"unknown scope {scope!r}: {VALID_SCOPES}")
         if limit <= 0:
@@ -58,7 +58,7 @@ class Router:
         self.last_stats = {"dim_skipped": 0}
         lists: list[list[Hit]] = []
         fts_hits = self.store.fts_search(query, scope=scope, session_id=session_id,
-                                         limit=limit * 2)
+                                         limit=limit * 2, owner=owner)
         if fts_hits:
             lists.append(fts_hits)
         if self.backend is not None:
@@ -66,7 +66,7 @@ class Router:
             tables = {"all": None, "session": ["um_messages", "um_summaries", "um_edges"],
                       "facts": ["um_facts"]}[scope]
             # Batch: все вектора одним проходом, тела — bodies_for (макс. 4 запроса).
-            all_vecs = self.store.all_vectors(tables)
+            all_vecs = self.store.all_vectors(tables, owner)
             cand = [(ot, oid, vec) for ot, oid, vec in all_vecs
                     if len(vec) == len(qv)]
             self.last_stats["dim_skipped"] = len(all_vecs) - len(cand)
@@ -84,7 +84,7 @@ class Router:
             scored.sort(key=lambda h: -h.score)
             if scored:
                 lists.append(scored[:limit * 2])
-        graph_hits = self._graph_arm(query, scope, session_id, limit * 2)
+        graph_hits = self._graph_arm(query, scope, session_id, limit * 2, owner)
         if graph_hits:
             lists.append(graph_hits)
         if not lists:
@@ -140,7 +140,7 @@ class Router:
         return [cands[i] for i in picked]
 
     def _graph_arm(self, query: str, scope: str, session_id: str,
-                   limit: int) -> list[Hit]:
+                   limit: int, owner: str = "") -> list[Hit]:
         """1-hop expansion: совпавшие сущности -> их рёбра."""
         if scope == "facts":
             return []
@@ -149,9 +149,9 @@ class Router:
             return []
         hits: list[Hit] = []
         seen: set[int] = set()
-        for ent in self.store.match_entities(terms, limit=5):
+        for ent in self.store.match_entities(terms, limit=5, owner=owner):
             for nb in self.store.neighbors(
-                    ent, session_id if scope == "session" else ""):
+                    ent, session_id if scope == "session" else "", owner=owner):
                 eid = nb["edge_id"]
                 if eid in seen:
                     continue

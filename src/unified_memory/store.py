@@ -24,17 +24,20 @@ PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS um_messages (
     id INTEGER PRIMARY KEY,
     session_id TEXT NOT NULL,
+    owner TEXT NOT NULL DEFAULT '',  -- v0.4-п.2: тенант; '' = legacy без изоляции
     role TEXT NOT NULL,
     content TEXT NOT NULL,
     created_at REAL NOT NULL,
     source TEXT NOT NULL DEFAULT 'unknown',
     externalized_ref TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_um_messages_session ON um_messages(session_id, id);
+-- Индексы создаются кодом (_INDEXES) ПОСЛЕ миграций: на legacy-БД
+-- колонки owner ещё нет, и CREATE INDEX падал бы с no such column.
 
 CREATE TABLE IF NOT EXISTS um_summaries (
     id INTEGER PRIMARY KEY,
     session_id TEXT NOT NULL,
+    owner TEXT NOT NULL DEFAULT '',
     depth INTEGER NOT NULL DEFAULT 0,
     body TEXT NOT NULL,
     covers_from INTEGER,
@@ -42,10 +45,11 @@ CREATE TABLE IF NOT EXISTS um_summaries (
     superseded_by INTEGER NOT NULL DEFAULT 0,  -- #2: схлопнуто в ноду ( lineage живёт)
     created_at REAL NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_um_summaries_session ON um_summaries(session_id, depth);
+
 
 CREATE TABLE IF NOT EXISTS um_facts (
     id INTEGER PRIMARY KEY,
+    owner TEXT NOT NULL DEFAULT '',
     category TEXT NOT NULL,
     name TEXT NOT NULL,
     body TEXT NOT NULL,
@@ -53,26 +57,27 @@ CREATE TABLE IF NOT EXISTS um_facts (
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_um_facts_cat ON um_facts(category);
+
 
 CREATE TABLE IF NOT EXISTS um_vectors (
     id INTEGER PRIMARY KEY,
     owner_table TEXT NOT NULL,
     owner_id INTEGER NOT NULL,
     embedding BLOB NOT NULL,
-    model TEXT NOT NULL
+    model TEXT NOT NULL,
+    owner TEXT NOT NULL DEFAULT ''  -- денормализация: фильтр без джойнов
 );
-CREATE INDEX IF NOT EXISTS idx_um_vectors_owner ON um_vectors(owner_table, owner_id);
-
 CREATE TABLE IF NOT EXISTS um_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 -- Граф памяти (источник: mnemosyne triples/episodic_graph).
 -- Сущности канонизируются по lower().strip(); вектора — в um_vectors.
 CREATE TABLE IF NOT EXISTS um_entities (
     id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE,   -- каноническое: lower().strip()
+    name TEXT NOT NULL,   -- каноническое: lower().strip()
     display TEXT NOT NULL DEFAULT '',  -- исходное написание («Иван», не «иван»)
-    created_at REAL NOT NULL
+    created_at REAL NOT NULL,
+    owner TEXT NOT NULL DEFAULT '',
+    UNIQUE(name, owner)  -- одно имя — разные тенанты, без пересечений
 );
 CREATE TABLE IF NOT EXISTS um_edges (
     id INTEGER PRIMARY KEY,
@@ -80,15 +85,29 @@ CREATE TABLE IF NOT EXISTS um_edges (
     predicate TEXT NOT NULL,
     object_id INTEGER NOT NULL REFERENCES um_entities(id),
     session_id TEXT NOT NULL DEFAULT '',
+    owner TEXT NOT NULL DEFAULT '',
     fact_id INTEGER NOT NULL DEFAULT 0,  -- provenance: какой mem_fact породил
     created_at REAL NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_um_edges_subj ON um_edges(subject_id);
-CREATE INDEX IF NOT EXISTS idx_um_edges_obj ON um_edges(object_id);
-CREATE INDEX IF NOT EXISTS idx_um_edges_fact ON um_edges(fact_id);
-CREATE INDEX IF NOT EXISTS idx_um_edges_session ON um_edges(session_id);
-CREATE INDEX IF NOT EXISTS idx_um_vectors_model ON um_vectors(model);
 """
+
+_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_um_messages_session ON um_messages(session_id, id)",
+    "CREATE INDEX IF NOT EXISTS idx_um_messages_owner ON um_messages(owner, session_id)",
+    "CREATE INDEX IF NOT EXISTS idx_um_summaries_session ON um_summaries(session_id, depth)",
+    "CREATE INDEX IF NOT EXISTS idx_um_summaries_owner ON um_summaries(owner, session_id)",
+    "CREATE INDEX IF NOT EXISTS idx_um_facts_cat ON um_facts(category)",
+    "CREATE INDEX IF NOT EXISTS idx_um_facts_owner ON um_facts(owner)",
+    "CREATE INDEX IF NOT EXISTS idx_um_vectors_owner ON um_vectors(owner_table, owner_id)",
+    "CREATE INDEX IF NOT EXISTS idx_um_vectors_tenant ON um_vectors(owner)",
+    "CREATE INDEX IF NOT EXISTS idx_um_vectors_model ON um_vectors(model)",
+    "CREATE INDEX IF NOT EXISTS idx_um_edges_subj ON um_edges(subject_id)",
+    "CREATE INDEX IF NOT EXISTS idx_um_edges_obj ON um_edges(object_id)",
+    "CREATE INDEX IF NOT EXISTS idx_um_edges_fact ON um_edges(fact_id)",
+    "CREATE INDEX IF NOT EXISTS idx_um_edges_session ON um_edges(session_id)",
+    "CREATE INDEX IF NOT EXISTS idx_um_edges_owner ON um_edges(owner, session_id)",
+    "CREATE INDEX IF NOT EXISTS idx_um_entities_owner ON um_entities(owner)",
+]
 
 _FTS_SCHEMA = """
 CREATE VIRTUAL TABLE IF NOT EXISTS um_fts USING fts5(
@@ -190,6 +209,32 @@ class Store:
             self.conn.execute("ALTER TABLE um_entities ADD COLUMN display TEXT NOT NULL DEFAULT ''")
             self.conn.execute("UPDATE um_entities SET display=name WHERE display=''")
             self.conn.commit()
+        # v0.4-п.2: owner-колонки. '' = legacy без изоляции, поведение не меняется.
+        for t in ("um_messages", "um_summaries", "um_facts",
+                  "um_edges", "um_vectors"):
+            cols = [r[1] for r in self.conn.execute(f"PRAGMA table_info({t})")]
+            if "owner" not in cols:
+                self.conn.execute(
+                    f"ALTER TABLE {t} ADD COLUMN owner TEXT NOT NULL DEFAULT ''")
+                self.conn.commit()
+        ecols = [r[1] for r in self.conn.execute("PRAGMA table_info(um_entities)")]
+        if "owner" not in ecols:
+            # UNIQUE(name) -> UNIQUE(name, owner): только через пересборку.
+            self.conn.executescript("""
+                CREATE TABLE um_entities_new(
+                    id INTEGER PRIMARY KEY, name TEXT NOT NULL,
+                    display TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL,
+                    owner TEXT NOT NULL DEFAULT '', UNIQUE(name, owner));
+                INSERT INTO um_entities_new(id, name, display, created_at, owner)
+                    SELECT id, name, display, created_at, '' FROM um_entities;
+                DROP TABLE um_entities;
+                ALTER TABLE um_entities_new RENAME TO um_entities;
+            """)
+            self.conn.commit()
+        # Индексы строго после миграций: на legacy-таблицах колонок ещё нет.
+        for stmt in _INDEXES:
+            self.conn.execute(stmt)
+        self.conn.commit()
         try:
             self.conn.executescript(_FTS_SCHEMA)
             self.fts = True
@@ -224,13 +269,15 @@ class Store:
         self.conn.commit()
         return cur.rowcount
 
-    def bump_tokens(self, session_id: str, delta: int) -> None:
+    @_locked
+    def bump_tokens(self, session_id: str, delta: int, owner: str = "") -> None:
         """#3: инкрементный счётчик давления. Вызывать из locked-контекста."""
+        key = f"tokens:{owner}:{session_id}" if owner else f"tokens:{session_id}"
         self.conn.execute(
             "INSERT INTO um_meta(key, value) VALUES(?,?)"
             " ON CONFLICT(key) DO UPDATE"
             " SET value=CAST(value AS INTEGER)+CAST(excluded.value AS INTEGER)",
-            (f"tokens:{session_id}", str(delta)))
+            (key, str(delta)))
         self.conn.commit()
 
     @_locked
@@ -243,27 +290,27 @@ class Store:
     # -- writes -----------------------------------------------------------
     @_locked
     def add_message(self, session_id: str, role: str, content: str,
-                    source: str = "unknown") -> int:
+                    source: str = "unknown", owner: str = "") -> int:
         cur = self.conn.execute(
-            "INSERT INTO um_messages(session_id, role, content, created_at, source)"
-            " VALUES(?,?,?,?,?)",
-            (session_id, role, content, time.time(), source),
+            "INSERT INTO um_messages(session_id, owner, role, content, created_at, source)"
+            " VALUES(?,?,?,?,?,?)",
+            (session_id, owner, role, content, time.time(), source),
         )
         mid = cur.lastrowid
         self._fts_index("um_messages", mid, content)
-        self.bump_tokens(session_id, estimate_tokens(content))
+        self.bump_tokens(session_id, estimate_tokens(content), owner)
         self.conn.commit()
         return mid
 
     @_locked
     def add_fact(self, category: str, name: str, body: str,
-                 importance: float = 0.5) -> int:
+                 importance: float = 0.5, owner: str = "") -> int:
         importance = max(0.0, min(1.0, importance))  # кап вместо жёстких 0.95
         now = time.time()
         cur = self.conn.execute(
-            "INSERT INTO um_facts(category, name, body, importance, created_at, updated_at)"
-            " VALUES(?,?,?,?,?,?)",
-            (category, name, body, importance, now, now),
+            "INSERT INTO um_facts(owner, category, name, body, importance, created_at, updated_at)"
+            " VALUES(?,?,?,?,?,?,?)",
+            (owner, category, name, body, importance, now, now),
         )
         fid = cur.lastrowid
         self._fts_index("um_facts", fid, f"{name} {body}")
@@ -272,30 +319,31 @@ class Store:
 
     @_locked
     def add_summary(self, session_id: str, body: str, depth: int = 0,
-                    covers_from: int | None = None, covers_to: int | None = None) -> int:
+                    covers_from: int | None = None, covers_to: int | None = None,
+                    owner: str = "") -> int:
         cur = self.conn.execute(
-            "INSERT INTO um_summaries(session_id, depth, body, covers_from, covers_to, created_at)"
-            " VALUES(?,?,?,?,?,?)",
-            (session_id, depth, body, covers_from, covers_to, time.time()),
+            "INSERT INTO um_summaries(session_id, owner, depth, body, covers_from, covers_to, created_at)"
+            " VALUES(?,?,?,?,?,?,?)",
+            (session_id, owner, depth, body, covers_from, covers_to, time.time()),
         )
         sid = cur.lastrowid
         self._fts_index("um_summaries", sid, body)
-        self.bump_tokens(session_id, estimate_tokens(body))
+        self.bump_tokens(session_id, estimate_tokens(body), owner)
         self.conn.commit()
         return sid
 
     @_locked
     def add_vector(self, owner_table: str, owner_id: int,
-                   vec: list[float], model: str) -> None:
+                   vec: list[float], model: str, owner: str = "") -> None:
         # Replace-семантика (#5): повторный embed того же owner не плодит дубли.
         self.conn.execute(
             "DELETE FROM um_vectors WHERE owner_table=? AND owner_id=?",
             (owner_table, owner_id),
         )
         self.conn.execute(
-            "INSERT INTO um_vectors(owner_table, owner_id, embedding, model)"
-            " VALUES(?,?,?,?)",
-            (owner_table, owner_id, pack_vector(vec), model),
+            "INSERT INTO um_vectors(owner_table, owner_id, embedding, model, owner)"
+            " VALUES(?,?,?,?,?)",
+            (owner_table, owner_id, pack_vector(vec), model, owner),
         )
         self.conn.commit()
 
@@ -309,31 +357,41 @@ class Store:
 
     # -- reads ------------------------------------------------------------
     @_locked
-    def get_message(self, mid: int) -> dict | None:
+    def get_message(self, mid: int, owner: str = "") -> dict | None:
         row = self.conn.execute(
-            "SELECT id, session_id, role, content, created_at, source"
+            "SELECT id, session_id, owner, role, content, created_at, source"
             " FROM um_messages WHERE id=?", (mid,)).fetchone()
         if not row:
             return None
-        return dict(zip(["id", "session_id", "role", "content", "created_at", "source"], row))
+        d = dict(zip(["id", "session_id", "owner", "role", "content",
+                      "created_at", "source"], row))
+        if owner and d["owner"] != owner:
+            return None  # чужой тенант: как будто нет
+        return d
 
     @_locked
     def session_messages(self, session_id: str, after_id: int = 0,
-                         limit: int = 50) -> list[dict]:
-        rows = self.conn.execute(
-            "SELECT id, session_id, role, content, created_at, source FROM um_messages"
-            " WHERE session_id=? AND id>? ORDER BY id LIMIT ?",
-            (session_id, after_id, limit)).fetchall()
+                         limit: int = 50, owner: str = "") -> list[dict]:
+        q = ("SELECT id, session_id, role, content, created_at, source FROM um_messages"
+             " WHERE session_id=? AND id>?")
+        params: list = [session_id, after_id]
+        if owner:
+            q += " AND owner=?"
+            params.append(owner)
+        rows = self.conn.execute(q + " ORDER BY id LIMIT ?", (*params, limit)).fetchall()
         keys = ["id", "session_id", "role", "content", "created_at", "source"]
         return [dict(zip(keys, r)) for r in rows]
 
     @_locked
     def fts_search(self, query: str, scope: str = "all",
-                   session_id: str = "", limit: int = 20) -> list[Hit]:
+                   session_id: str = "", limit: int = 20,
+                   owner: str = "") -> list[Hit]:
         """Полнотекст: FTS5 при наличии, иначе LIKE по токенам.
 
         Trigram-FTS не ищет термы короче 3 символов («да», «он») — для таких
         запросов сразу идём в LIKE, а не возвращаем пусто (#1).
+
+        owner="" — legacy без фильтра; непустой — строгая изоляция тенанта.
         """
         terms = tokenize(query)
         if not terms:
@@ -353,9 +411,11 @@ class Store:
                 rows = self.conn.execute(q, (match, limit * 3)).fetchall()
             except sqlite3.OperationalError:
                 rows = []
+            cand = [(ot, oid) for ot, oid in rows if ot in tables]
+            owners = self.owners_for(cand) if owner else {}
             hits = []
-            for ot, oid in rows:
-                if ot not in tables:
+            for ot, oid in cand:
+                if owner and owners.get((ot, oid), "") != owner:
                     continue
                 body, sid = self._body_of(ot, oid)
                 if body is None:
@@ -376,6 +436,9 @@ class Store:
                     ["e.predicate LIKE ?", "s.name LIKE ?", "o.name LIKE ?"]
                     * len(terms[:6]))
                 params = [f"%{t}%" for t in terms[:6] for _ in range(3)]
+                if owner:
+                    cond = (f"(e.owner=? AND s.owner=? AND o.owner=?) AND ({cond})")
+                    params = [owner, owner, owner] + params
                 if scope == "session":
                     cond = f"(e.session_id=?) AND ({cond})"
                     params = [session_id] + params
@@ -392,6 +455,9 @@ class Store:
             col = "content" if ot == "um_messages" else "body"
             cond = " OR ".join([f"{col} LIKE ?"] * len(terms[:6]))
             params: list = [f"%{t}%" for t in terms[:6]]
+            if owner and ot in ("um_messages", "um_summaries", "um_facts"):
+                cond = f"(owner=?) AND ({cond})"
+                params = [owner] + params
             if ot == "um_messages" and scope == "session":
                 cond = f"(session_id=?) AND ({cond})"
                 params = [session_id] + params
@@ -431,16 +497,28 @@ class Store:
         return None, ""
 
     @_locked
-    def all_vectors(self, owner_tables: list[str] | None = None) -> list[tuple[str, int, list[float]]]:
+    def all_vectors(self, owner_tables: list[str] | None = None,
+                    owner: str = "") -> list[tuple[str, int, list[float]]]:
         q = "SELECT owner_table, owner_id, embedding FROM um_vectors"
+        conds: list = []
         params: list = []
         if owner_tables:
-            q += f" WHERE owner_table IN ({','.join('?' * len(owner_tables))})"
-            params = owner_tables
+            conds.append(f"owner_table IN ({','.join('?' * len(owner_tables))})")
+            params += owner_tables
+        if owner:
+            conds.append("owner=?")
+            params.append(owner)
+        if conds:
+            q += " WHERE " + " AND ".join(conds)
         return [(ot, oid, unpack_vector(b)) for ot, oid, b in self.conn.execute(q, params)]
 
     @_locked
-    def delete_fact(self, fid: int) -> bool:
+    def delete_fact(self, fid: int, owner: str = "") -> bool:
+        if owner:
+            row = self.conn.execute(
+                "SELECT owner FROM um_facts WHERE id=?", (fid,)).fetchone()
+            if not row or (row[0] or "") != owner:
+                return False
         cur = self.conn.execute("DELETE FROM um_facts WHERE id=?", (fid,))
         self.conn.execute("DELETE FROM um_vectors WHERE owner_table='um_facts' AND owner_id=?", (fid,))
         if self.fts:
@@ -521,6 +599,22 @@ class Store:
         return out
 
     @_locked
+    def owners_for(self, refs: list[tuple[str, int]]) -> dict[tuple[str, int], str]:
+        """Batch владельцев для owner-фильтра FTS/graph-arm (1 запрос на таблицу)."""
+        out: dict[tuple[str, int], str] = {}
+        by_table: dict[str, list[int]] = {}
+        for ot, oid in refs:
+            by_table.setdefault(ot, []).append(oid)
+        for ot, oids in by_table.items():
+            if ot not in ("um_messages", "um_summaries", "um_facts", "um_edges"):
+                continue
+            ph = ",".join("?" * len(oids))
+            for oid, own in self.conn.execute(
+                    f"SELECT id, owner FROM {ot} WHERE id IN ({ph})", oids):
+                out[(ot, oid)] = own or ""
+        return out
+
+    @_locked
     def has_vector(self, owner_table: str, owner_id: int) -> bool:
         return self.conn.execute(
             "SELECT 1 FROM um_vectors WHERE owner_table=? AND owner_id=?",
@@ -544,10 +638,13 @@ class Store:
                (SELECT id FROM um_entities)""")
 
     @_locked
-    def delete_edge(self, eid: int) -> bool:
+    def delete_edge(self, eid: int, owner: str = "") -> bool:
         """Прямое удаление ребра — закрывает дыру бессмертных fact_id=0 (#3)."""
-        cur = self.conn.execute("SELECT 1 FROM um_edges WHERE id=?", (eid,)).fetchone()
-        if not cur:
+        row = self.conn.execute(
+            "SELECT owner FROM um_edges WHERE id=?", (eid,)).fetchone()
+        if not row:
+            return False
+        if owner and (row[0] or "") != owner:
             return False
         self._drop_edge_rows(eid)
         self._prune_orphan_entities()
@@ -555,11 +652,15 @@ class Store:
         return True
 
     @_locked
-    def delete_entity(self, name: str) -> bool:
+    def delete_entity(self, name: str, owner: str = "") -> bool:
         """Удалить сущность + все её рёбра каскадом."""
         key = name.strip().lower()
-        row = self.conn.execute(
-            "SELECT id FROM um_entities WHERE name=?", (key,)).fetchone()
+        q = "SELECT id FROM um_entities WHERE name=?"
+        params: list = [key]
+        if owner:
+            q += " AND owner=?"
+            params.append(owner)
+        row = self.conn.execute(q, params).fetchone()
         if not row:
             return False
         ent_id = row[0]
@@ -577,29 +678,29 @@ class Store:
 
     # -- graph ----------------------------------------------------------
     @_locked
-    def add_entity(self, name: str) -> int:
+    def add_entity(self, name: str, owner: str = "") -> int:
         import time as _t
         key = name.strip().lower()
         row = self.conn.execute(
-            "SELECT id FROM um_entities WHERE name=?", (key,)).fetchone()
+            "SELECT id FROM um_entities WHERE name=? AND owner=?", (key, owner)).fetchone()
         if row:
             return row[0]
         cur = self.conn.execute(
-            "INSERT INTO um_entities(name, display, created_at) VALUES(?,?,?)",
-            (key, name.strip(), _t.time()))
+            "INSERT INTO um_entities(name, display, created_at, owner) VALUES(?,?,?,?)",
+            (key, name.strip(), _t.time(), owner))
         self.conn.commit()
         return cur.lastrowid
 
     @_locked
     def add_edge(self, subject: str, predicate: str, obj: str,
-                 session_id: str = "", fact_id: int = 0) -> int:
+                 session_id: str = "", fact_id: int = 0, owner: str = "") -> int:
         import time as _t
-        sid = self.add_entity(subject)
-        oid = self.add_entity(obj)
+        sid = self.add_entity(subject, owner)
+        oid = self.add_entity(obj, owner)
         cur = self.conn.execute(
             "INSERT INTO um_edges(subject_id, predicate, object_id, session_id,"
-            " fact_id, created_at) VALUES(?,?,?,?,?,?)",
-            (sid, predicate.strip().lower(), oid, session_id, fact_id, _t.time()))
+            " fact_id, created_at, owner) VALUES(?,?,?,?,?,?,?)",
+            (sid, predicate.strip().lower(), oid, session_id, fact_id, _t.time(), owner))
         eid = cur.lastrowid
         self._fts_index("um_edges", eid, f"{subject} {predicate} {obj}")
         self.conn.commit()
@@ -607,10 +708,14 @@ class Store:
 
     @_locked
     def neighbors(self, entity_name: str, session_id: str = "",
-                  limit: int = 100) -> list[dict]:
+                  limit: int = 100, owner: str = "") -> list[dict]:
         key = entity_name.strip().lower()
-        row = self.conn.execute(
-            "SELECT id FROM um_entities WHERE name=?", (key,)).fetchone()
+        q = "SELECT id FROM um_entities WHERE name=?"
+        params: list = [key]
+        if owner:
+            q += " AND owner=?"
+            params.append(owner)
+        row = self.conn.execute(q, params).fetchone()
         if not row:
             return []
         eid = row[0]
@@ -619,10 +724,13 @@ class Store:
                JOIN um_entities s ON s.id = e.subject_id
                JOIN um_entities o ON o.id = e.object_id
                WHERE (e.subject_id = ? OR e.object_id = ?)"""
-        params: list = [eid, eid]
+        params = [eid, eid]
         if session_id:
             q += " AND e.session_id = ?"
             params.append(session_id)
+        if owner:
+            q += " AND e.owner = ?"
+            params.append(owner)
         q += " LIMIT ?"
         params.append(limit)
         rows = self.conn.execute(q, params).fetchall()
@@ -630,13 +738,17 @@ class Store:
                 for r in rows]
 
     @_locked
-    def match_entities(self, terms: list[str], limit: int = 10) -> list[str]:
+    def match_entities(self, terms: list[str], limit: int = 10,
+                       owner: str = "") -> list[str]:
         out = []
         for t in terms[:8]:
             esc = t.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            for r in self.conn.execute(
-                    "SELECT name FROM um_entities WHERE name LIKE ? ESCAPE '\\' LIMIT ?",
-                    (f"%{esc}%", limit)):
+            q = "SELECT name FROM um_entities WHERE name LIKE ? ESCAPE '\\'"
+            params: list = [f"%{esc}%"]
+            if owner:
+                q += " AND owner=?"
+                params.append(owner)
+            for r in self.conn.execute(q + " LIMIT ?", (*params, limit)):
                 if r[0] not in out:
                     out.append(r[0])
         return out[:limit]
@@ -649,6 +761,13 @@ class Store:
             out[t] = self.conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
         out["fts"] = self.fts
         out["embedding_model"] = self.meta_get("embedding_model")
+        try:
+            out["owners"] = sorted(
+                r[0] or "" for r in self.conn.execute(
+                    "SELECT owner FROM um_messages UNION SELECT owner FROM um_facts"
+                    " UNION SELECT owner FROM um_edges").fetchall())
+        except Exception:
+            out["owners"] = []
         return out
 
     @_locked

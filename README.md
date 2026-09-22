@@ -110,7 +110,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 
 ## Известные ограничения (v0.3)
 
-- Нет user-isolation: один стор на инсталляцию, мультитенантность не предусмотрена.
+- Isolation: `owner=""` (дефолт) — legacy без фильтра, видит всё; непустой owner — строгая изоляция во всех тулах. Старые БД мигрируют сами (owner=''), сущности пересобираются под UNIQUE(name, owner).
 - Redaction forward-only: сторa, созданные до v0.4, могут содержать секреты — чистить руками + reindex.
 - `UM_VEC_TYPE` удалён: вектора всегда float32, конфиг больше не врёт.
 - Смена embedding-модели требует reindex (зато громко падает, а не молча врёт — см. `DimensionMismatchError`). Ранние сторa на MiniLM-384 с дефолтом mpnet-768 несовместимы: пересоздайте БД или задайте `UM_EMBEDDING_MODEL` явно.
@@ -118,7 +118,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 ## Разработка
 
 ```bash
-python -m pytest tests/ -q   # 83 passed, 3 skipped без fastembed; UM_LIVE_OPENAI=1 — live против 8127
+python -m pytest tests/ -q   # 90 passed, 3 skipped без fastembed; UM_LIVE_OPENAI=1 — live против 8127
 ```
 
 Roadmap и разбор апстримов: `docs/MIGRATION_PLAN.md`. Переезд с hermes-lcm/mnemosyne: `docs/IMPORT.md`.
