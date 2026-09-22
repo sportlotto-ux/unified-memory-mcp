@@ -90,3 +90,42 @@ def test_reopen_without_vector_until_reindex(store):
     assert out["status"] == "reopened"
     assert _vlen(store, fid) == 0                      # до mem_reindex
 
+
+# ---------- P4.5: dedupe только при отсутствии индекса ----------
+
+_COLS = ("owner, category, name, body, importance, created_at, updated_at,"
+         " valid_until, superseded_by")
+
+
+def test_legacy_duplicates_collapsed_then_skipped(tmp_path):
+    cfg = Config(db_path=tmp_path / "d.db", archive_path=tmp_path / "a.db",
+                 context_tokens=10**9)
+    s = Store(cfg)
+    s.conn.execute("DROP INDEX ux_um_facts_live")  # симулируем legacy без индекса
+    for body in ("b1", "b2"):
+        s.conn.execute(
+            f"INSERT INTO um_facts({_COLS}) VALUES('','c','n',?,0.5,1,1,0,0)",
+            (body,))
+    s.conn.commit()
+    s.close()
+
+    s2 = Store(cfg)  # первый open: dedupe схлопывает дубли
+    assert s2.conn.execute(
+        "SELECT count(*) FROM um_facts WHERE valid_until=0 AND name='n'"
+    ).fetchone()[0] == 1
+    assert s2.conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE name='ux_um_facts_live'").fetchone()
+    s2.close()
+
+    s3 = Store(cfg)  # второй open: индекс есть → скан пропущен, живьё не тронуто
+    assert s3.conn.execute(
+        "SELECT count(*) FROM um_facts WHERE valid_until=0 AND name='n'"
+    ).fetchone()[0] == 1
+    s3.close()
+
+
+def test_fresh_db_has_index(store):
+    assert store.conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE name='ux_um_facts_live'").fetchone()
+
+

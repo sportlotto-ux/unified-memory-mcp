@@ -314,7 +314,13 @@ class Store:
             self.conn.executescript("DROP TABLE um_links;")
             self.conn.executescript(SCHEMA)
             self.conn.commit()
-        self._dedupe_live_slots()
+        # P4.5: индекс создаётся строго ПОСЛЕ dedupe в том же проходе, значит его
+        # наличие ⟹ dedupe уже отработал. Полный скан на каждом открытии не гоняем.
+        _idx = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index'"
+            " AND name='ux_um_facts_live'").fetchone()
+        if not _idx:
+            self._dedupe_live_slots()
         # Индексы строго после миграций: на legacy-таблицах колонок ещё нет.
         for stmt in _INDEXES:
             self.conn.execute(stmt)
