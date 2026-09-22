@@ -123,17 +123,15 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 | `UM_DAG_FANIN` | `5` | Нод уровня → одна выше |
 | `UM_ASSEMBLY_BUDGET` | `8000` | Токенов в `mem_assemble` по дефолту |
 
-## Известные ограничения (v0.5)
+## Известные ограничения (v0.6)
 
 Полный список отложенного — `docs/BACKLOG.md`.
 
-- Архив пока выносит **сообщения** (текст+вектор) — основной драйвер роста. Вынос истёкших фактов/рёбер и `um_summaries` — TODO; в плане (`docs/BACKLOG.md`).
-
-- Isolation: `owner=""` (дефолт) — legacy без фильтра, видит всё; непустой owner — строгая изоляция во всех тулах. Старые БД мигрируют сами (owner=''), сущности пересобираются под UNIQUE(name, owner).
+- Архив выносит только **сообщения** (текст+вектор) — основной драйвер роста. Истёкшие факты/рёбра и `um_summaries` — TODO (`docs/BACKLOG.md`).
+- Isolation добровольная: `owner=""` (дефолт) — legacy без фильтра, видит всё; строгая изоляция — только при непустом `owner`. Старые БД мигрируют сами (`owner=''`), сущности пересобираются под `UNIQUE(name, owner)`.
 - Redaction forward-only: сторa, созданные до v0.4, могут содержать секреты — чистить руками + reindex.
-- `UM_VEC_TYPE` удалён: вектора всегда float32, конфиг больше не врёт.
-- Тесты герметичны: ambient `UM_*` из шелла не влияет на прогон (`tests/conftest.py` чистит env; `UM_LIVE_*` — opt-in гейты, их не трогает).
-- Смена embedding-модели требует reindex (зато громко падает, а не молча врёт — см. `DimensionMismatchError`). Ранние сторa на MiniLM-384 с дефолтом mpnet-768 несовместимы: пересоздайте БД или задайте `UM_EMBEDDING_MODEL` явно.
+- Смена embedding-модели требует reindex (падает громко, `DimensionMismatchError`): ранние сторa на MiniLM-384 с дефолтом mpnet-768 несовместимы — пересоздайте БД или задайте `UM_EMBEDDING_MODEL` явно.
+- Нет cron-режима для age-based retention (а): `mem_doctor(mode=retention)` не существует, а `mode=archive` игнорирует `UM_RETENTION_DAYS` — см. `docs/BACKLOG.md` (P3.5).
 
 ## Разработка
 
