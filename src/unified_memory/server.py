@@ -248,7 +248,7 @@ def mem_update(kind: str = "fact", id: int = 0, body: str = "",
     store = _store()
     vu = parse_when(valid_until) if kind in ("fact", "edge", "link") else None
     if kind == "fact":
-        out = store.update_fact(
+        out = _ingest().update_fact(
             int(id), body=body or None,
             importance=None if importance < 0 else importance,
             valid_until=vu, owner=owner)

@@ -947,6 +947,13 @@ class Store:
         return None, ""
 
     @_locked
+    def fact_row(self, fid: int) -> tuple[str, str, str] | None:
+        """(owner, name, body) факта — для переэмбеддинга новых/reopen версий (A2)."""
+        r = self.conn.execute(
+            "SELECT owner, name, body FROM um_facts WHERE id=?", (fid,)).fetchone()
+        return (r[0] or "", r[1], r[2]) if r else None
+
+    @_locked
     def all_vectors(self, owner_tables: list[str] | None = None,
                     owner: str = "") -> list[tuple[str, int, list[float]]]:
         q = "SELECT owner_table, owner_id, embedding FROM um_vectors"

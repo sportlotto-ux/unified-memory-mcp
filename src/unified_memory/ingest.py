@@ -83,10 +83,7 @@ class Ingest:
         fid = out["id"]
         if out["status"] in ("noop", "updated"):
             return out
-        if self.backend is not None:
-            self.store.add_vector("um_facts", fid,
-                                  self.backend.embed_docs([f"{name} {body}"])[0],
-                                  self.backend.model_name, owner, _commit=_commit)
+        self._embed_fact(fid, _commit=_commit)
         if subject and predicate and obj:
             eid = self.store.add_edge(subject, predicate, obj, session_id,
                                       fact_id=fid, owner=owner, _commit=_commit)
@@ -103,6 +100,34 @@ class Ingest:
                         "um_entities", ent_id,
                         self.backend.embed_docs([ent])[0],
                         self.backend.model_name, owner, _commit=_commit)
+        return out
+
+    def _embed_fact(self, fid: int, _commit: bool = True) -> None:
+        """A2: вектор живого факта по актуальному (name, body). No-op без backend."""
+        if self.backend is None:
+            return
+        row = self.store.fact_row(fid)
+        if row is None:
+            return
+        owner, name, body = row
+        self.store.add_vector("um_facts", fid,
+                              self.backend.embed_docs([f"{name} {body}"])[0],
+                              self.backend.model_name, owner, _commit=_commit)
+
+    def update_fact(self, fid: int, body: str | None = None,
+                    importance: float | None = None,
+                    valid_until: float | None = None,
+                    owner: str = "", _commit: bool = True) -> dict | None:
+        """Правка факта через Ingest: после store.update_fact переэмбеддить
+        новую версию (superseded) или reopened факт — иначе он слеп для
+        вектор-плеча (P4.8 удалил вектор при expire)."""
+        out = self.store.update_fact(fid, body=body, importance=importance,
+                                     valid_until=valid_until, owner=owner,
+                                     _commit=_commit)
+        if out is None:
+            return None
+        if out["status"] in ("superseded", "reopened"):
+            self._embed_fact(out["id"], _commit=_commit)
         return out
 
     def batch(self, ops: list[dict], dry_run: bool = False,
@@ -162,7 +187,7 @@ class Ingest:
                 body = op.get("body")
                 body = self._clean(str(body)) if body not in (None, "") else None
                 imp = op.get("importance", -1.0)
-                out = self.store.update_fact(
+                out = self.update_fact(
                     oid, body=body,
                     importance=None if imp is None or float(imp) < 0 else float(imp),
                     valid_until=vu, owner=owner, _commit=False)
