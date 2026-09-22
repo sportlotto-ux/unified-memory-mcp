@@ -45,6 +45,41 @@ def open_archive(path) -> sqlite3.Connection:
     return conn
 
 
+def audit(store, path) -> dict:
+    """B7: read-only сверка горячих заглушек с архивом. Архив НЕ создаётся.
+
+    externalized_ref = "<label>#<archive_id>"; orphan — заглушка, чей id в
+    архиве не найден (архив затёрт/перенесён) либо ref не парсится.
+    """
+    out = {"file_exists": bool(path) and Path(path).exists(),
+           "archive_path": str(path), "stubs": 0, "archived_rows": 0, "orphans": 0}
+    stubs = store.select(
+        "SELECT externalized_ref FROM um_messages"
+        " WHERE externalized_ref IS NOT NULL AND externalized_ref!=''")
+    out["stubs"] = len(stubs)
+    arch_ids: set = set()
+    if out["file_exists"]:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            try:
+                arch_ids = {r[0] for r in conn.execute("SELECT id FROM ar_messages")}
+            except sqlite3.OperationalError:  # пустой/чужой файл
+                arch_ids = set()
+        finally:
+            conn.close()
+    out["archived_rows"] = len(arch_ids)
+    out["orphans"] = sum(1 for r in stubs
+                         if _ref_id(r[0]) not in arch_ids)
+    return out
+
+
+def _ref_id(ref) -> int | None:
+    try:
+        return int(str(ref).rsplit("#", 1)[-1])
+    except (ValueError, IndexError):
+        return None
+
+
 def move_oldest(store, conn: sqlite3.Connection, limit: int = 500,
                 before_ts: float = 0.0, label: str = "") -> int:
     """Старейшие сообщения -> архив (текст+вектор), в горячей — заглушка (a2)."""

@@ -401,6 +401,34 @@ def _wal_bytes(db_path) -> int:
         return 0
 
 
+def _secret_scan(store, patterns, cap: int = 50) -> dict:
+    """B8: read-only скан горячего стора каталогом redaction.
+
+    Отчёт только `{pattern, kind, id}` — БЕЗ значений (иначе сканер сам утечка).
+    """
+    from unified_memory.redact import PATTERNS
+
+    active = [p for p in patterns if p in PATTERNS]
+    sources = [("um_messages", "content"), ("um_facts", "body"),
+               ("um_summaries", "body"), ("um_entities", "name"),
+               ("um_edges", "predicate")]
+    hits: list = []
+    total = 0
+    for table, col in sources:
+        for oid, text in store.conn.execute(
+                f"SELECT id, {col} FROM {table} WHERE {col} IS NOT NULL"):
+            if not text:
+                continue
+            for name in active:
+                if name == "private_key" and "PRIVATE KEY" not in text.upper():
+                    continue
+                if PATTERNS[name].search(text):
+                    total += 1
+                    if len(hits) < cap:
+                        hits.append({"pattern": name, "kind": table, "id": oid})
+    return {"hits": hits, "total": total, "cap": cap, "patterns": active}
+
+
 @mcp.tool()
 def mem_status() -> str:
     """Store stats and degradation flags."""
@@ -437,6 +465,8 @@ def mem_status() -> str:
 def mem_doctor(mode: str = "check", apply: bool = False) -> str:
     """DB diagnostics. mode: check (readonly: diagnostics + hygiene candidates) |
     export (readonly JSON dump to <db>.export-<ts>.json) |
+    archive_check (readonly: заглушки ↔ архив, orphans) |
+    secret_scan (readonly: каталог redaction по горячему стору, отчёт без значений) |
     retention (age-based: move hot messages older than UM_RETENTION_DAYS to archive) |
     clean (purge orphans) | repair (purge + FTS rebuild + vec rebuild).
     clean/repair/retention требуют apply=True (иначе dry-run) и всегда backup-first."""
@@ -446,10 +476,16 @@ def mem_doctor(mode: str = "check", apply: bool = False) -> str:
     if mode == "export":
         from unified_memory.export import export_store
         return json.dumps(export_store(store), ensure_ascii=False)
+    if mode == "archive_check":  # B7: read-only сверка заглушек с архивом
+        return json.dumps({"mode": mode,
+                           **archive.audit(store, _STATE["cfg"].archive_path)})
+    if mode == "secret_scan":  # B8: read-only скан, отчёт без значений
+        return json.dumps({"mode": mode,
+                           **_secret_scan(store, _STATE["cfg"].redact_patterns)})
     if mode not in ("clean", "repair", "archive", "purge", "retention"):
         raise ValueError(
-            f"unknown mode {mode!r}: check | export | clean | repair | archive"
-            " | purge | retention")
+            f"unknown mode {mode!r}: check | export | archive_check | secret_scan"
+            " | clean | repair | archive | purge | retention")
     cfg = _STATE["cfg"]
     if mode == "archive":
         if not apply:

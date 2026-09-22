@@ -150,3 +150,43 @@ def test_status_wal_and_maintenance_never_raises(srv):
     assert isinstance(st["wal_bytes"], int) and st["wal_bytes"] >= 0
     # maintenance с checkpoint(TRUNCATE) не должен бросать
     srv._maybe_maintenance(srv._STATE["store"], srv._STATE["cfg"])
+
+
+# ---------- v0.7.3 B7: archive_check (read-only) ----------
+
+def test_archive_check_reports_and_orphans(srv):
+    import sqlite3
+
+    import unified_memory.archive as arc
+    srv.mem_remember(session_id="s", role="user", content="уедет в архив")
+    st, cfg = srv._STATE["store"], srv._STATE["cfg"]
+    conn = arc.open_archive(cfg.archive_path)
+    arc.move_oldest(st, conn, 10)
+    conn.close()
+    out = json.loads(srv.mem_doctor(mode="archive_check"))
+    assert out["file_exists"] and out["stubs"] == 1 and out["archived_rows"] == 1
+    assert out["orphans"] == 0
+
+    c = sqlite3.connect(str(cfg.archive_path))
+    c.execute("DELETE FROM ar_messages")
+    c.commit()
+    c.close()
+    out2 = json.loads(srv.mem_doctor(mode="archive_check"))
+    assert out2["orphans"] == 1  # заглушка без строки в архиве
+
+
+# ---------- v0.7.3 B8: secret_scan без утечки значений ----------
+
+def test_secret_scan_reports_without_values(srv):
+    fid = json.loads(srv.mem_fact("c", "n", "обычное тело"))["id"]
+    secret = "sk-" + "A" * 20
+    st = srv._STATE["store"]
+    st.conn.execute("UPDATE um_facts SET body=? WHERE id=?",
+                    (f"api_key={secret}", fid))
+    st.conn.commit()
+    raw = srv.mem_doctor(mode="secret_scan")
+    out = json.loads(raw)
+    assert out["total"] >= 1
+    assert any(h["pattern"] == "api_key" and h["kind"] == "um_facts"
+               and h["id"] == fid for h in out["hits"])
+    assert secret not in raw  # отчёт не должен содержать значение
