@@ -64,28 +64,44 @@ def _ingest():
 
 
 def _maybe_maintenance(store, cfg) -> None:
-    """Никогда не роняет тул: любой сбой — в um_meta.maintenance_error."""
+    """Связка retention→архив (вариант i), никогда не роняет тул.
+
+    retention>0: раз в неделю шаг (а) — горячее старше N дней в архив.
+    Затем (б) — если размер всё ещё > порога, добить oldest до порога.
+    retention=0: только (б). Авто-удаления НЕТ: purge_older_than — вручную.
+    Любой сбой уходит в um_meta.maintenance_error, а не наружу.
+    """
     try:
         now = time.time()
+        size_limit = cfg.archive_size_mb * 1024 * 1024
         if cfg.retention_days > 0:
             last = float(store.meta_get("retention_last_run") or 0)
             if now - last >= 7 * 86400:
+                cutoff = now - cfg.retention_days * 86400
                 conn = archive.open_archive(cfg.archive_path)
                 try:
-                    archive.purge_older_than(
-                        conn, now - cfg.retention_days * 86400)
+                    moved = archive.move_oldest(
+                        store, conn, cfg.archive_batch, before_ts=cutoff,
+                        label=str(cfg.archive_path))
                 finally:
                     conn.close()
                 store.meta_set("retention_last_run", str(now))
-        if store.db_size_bytes() >= cfg.archive_size_mb * 1024 * 1024:
-            conn = archive.open_archive(cfg.archive_path)
-            try:
-                moved = archive.move_oldest(store, conn, cfg.archive_batch,
-                                            label=str(cfg.archive_path))
-            finally:
-                conn.close()
+                store.meta_set("retention_last_moved", str(moved))
+        # (б) страховка от быстрого роста — работает и при retention=0
+        if store.db_size_bytes() >= size_limit:
+            total = 0
+            for _ in range(10):  # bounded: не более 10 батчей за проход
+                conn = archive.open_archive(cfg.archive_path)
+                try:
+                    moved = archive.move_oldest(store, conn, cfg.archive_batch,
+                                                label=str(cfg.archive_path))
+                finally:
+                    conn.close()
+                total += moved
+                if moved == 0 or store.db_size_bytes() < size_limit:
+                    break
             store.meta_set("archive_last_run", str(now))
-            store.meta_set("archive_last_moved", str(moved))
+            store.meta_set("archive_last_moved", str(total))
     except Exception as e:  # noqa: BLE001 — обслуживание не должно ломать тулы
         try:
             store.meta_set("maintenance_error", f"{type(e).__name__}: {e}"[:200])

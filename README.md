@@ -89,7 +89,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 - **Сжатие:** давление = токены сессии vs `UM_CONTEXT_TOKENS × UM_COMPACT_THRESHOLD` (дефолт 200k × 0.35, как LCM). Накрыло → старые (всё кроме `UM_FRESH_TAIL_COUNT` свежих) в summary depth 0; каждые `UM_DAG_FANIN` нод уровня схлопываются в уровень выше. Frontier в `um_meta` — каждое сообщение жмётся один раз. `mem_assemble` собирает bounded контекст под бюджет.
 - **Защита от старых болячек:** нет жёсткого `importance: 0.95` (причина canonical-bloat в mnemosyne) — кап `0..1`; смена embedding-модели без reindex — громкая ошибка, а не тихая деградация recall.
 - **Redaction:** гейт на входе (`UM_REDACT_ENABLED`, дефолт ON): `api_key,bearer_token,password_assignment,private_key` — каталог и регулярки как у LCM. Режется до SQLite/FTS/vectors/summaries, плейсхолдер `[UM redaction: name=...; chars=N]` необратим. Forward-only: что попало в стор раньше — чистить руками + reindex.
-- **Retention/архив:** по умолчанию (`UM_RETENTION_DAYS=0`) копится **всё и вечно** — ничего не удаляется из коробки. При пороге горячей БД (`UM_ARCHIVE_SIZE_MB`, дефолт 1 ГБ) старейшие сообщения уезжают в отдельный файл-архив: текст **и вектор** покидают горячую БД (вариант a2 — гарантия порога), в горячей остаётся заглушка `[archived]`, `mem_expand` прозрачно достаёт текст из архива. При `UM_RETENTION_DAYS>0` раз в неделю (ленивый проход при старте) чистится **архив**, и только по сроку — «не сохранив, не удаляем». `mem_doctor(mode=archive|purge)` — вручную, dry-run по умолчанию.
+- **Retention/архив (lossless-холод):** `UM_RETENTION_DAYS` = **сколько держать ГОРЯЧЕЕ** (recall быстрый, БД маленькая), а не срок жизни данных. `0` (дефолт) = копим всё в горячей вечно. `>0` → раз в неделю (ленивый проход) горячее старше N дней уезжает в архив. Архив — **отдельный файл, lossless**, живёт вечно; **автоудаления нет** — физическое `purge` только вручную (`mem_doctor(mode=purge, apply=true)`). При пороге размера (`UM_ARCHIVE_SIZE_MB`, дефолт 1 ГБ) старейшее добивается до порога. В архив уезжают текст **и вектор** (вариант a2 — так порог реально держится), в горячей остаётся заглушка `[archived]`, `mem_expand` прозрачно достаёт текст из архива.
 - **Факты = слоты (`mem_fact`), сообщения = лог (`mem_remember`).** Один живой факт на `(owner, category, name)` — гарантирует partial unique index, не код. Новое тело вытесняет старое (`valid_until`, `superseded_by`), история lossless; `valid_until=0` = живое (sentinel). `mem_recall`/`mem_expand` прячут истёкшее (`include_expired=True` — аудит). `mem_forget` — жёсткое удаление, истечение — только `mem_update`.
 
 ## Переменные окружения
@@ -103,7 +103,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 | `UM_EMBEDDING_TIMEOUT` | `30.0` | Таймаут HTTP, сек |
 | `UM_EMBEDDING_DIM` | — | Пропустить probe dim (openai), полезно оффлайн |
 | `UM_VEC_INDEX` | `auto` | `auto` (строить в reindex, KNN при совпадении dim) \| `off` (всегда brute force) |
-| `UM_RETENTION_DAYS` | `0` | `0` = данные копятся вечно (lossless-дефолт). `>0` = автоудаление из архива раз в неделю |
+| `UM_RETENTION_DAYS` | `0` | `0` = копим вечно. `>0` = горячее старше N дней уезжает в архив раз в неделю (lossless; удаление — только вручную `purge`) |
 | `UM_ARCHIVE_SIZE_MB` | `1024` | Порог горячей БД: старейшие сообщения уезжают в архив |
 | `UM_ARCHIVE_PATH` | `~/.hermes/unified_memory.archive.db` | Отдельный файл холода |
 | `UM_ARCHIVE_BATCH` | `500` | Сколько сообщений за один проход архивации |
@@ -130,7 +130,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 ## Разработка
 
 ```bash
-python -m pytest tests/ -q   # 141 passed, 4 skipped без fastembed/vec; UM_LIVE_OPENAI=1 — live против 8127
+python -m pytest tests/ -q   # 142 passed, 4 skipped без fastembed/vec; UM_LIVE_OPENAI=1 — live против 8127
 ```
 
 Прогон герметичен: `tests/conftest.py` снимает ambient `UM_*` (иначе шелл с
