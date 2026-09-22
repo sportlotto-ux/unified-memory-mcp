@@ -23,12 +23,16 @@ def rrf_fuse(rank_lists: list[list[Hit]], k: int = _RRF_K) -> list[Hit]:
         for rank, h in enumerate(lst):
             key = (h.owner_table, h.owner_id)
             scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank + 1)
-            keep[key] = h
+            prev = keep.get(key)
+            # A4: сохранить сниппет, если его принесло FTS-плечо (прочие — без него).
+            if prev is None or (not prev.snippet and h.snippet):
+                keep[key] = h
     ordered = sorted(scores.items(), key=lambda kv: -kv[1])
     out = []
     for (ot, oid), s in ordered:
         h = keep[(ot, oid)]
-        out.append(Hit(h.owner_table, h.owner_id, h.body, s, h.session_id, h.extra))
+        out.append(Hit(h.owner_table, h.owner_id, h.body, s, h.session_id,
+                       h.extra, snippet=h.snippet))
     return out
 
 
@@ -157,7 +161,7 @@ class Router:
             if scope == "all" and session_id and h.session_id == session_id:
                 score *= 1.0 + self.cfg.scope_bias
             adjusted.append(Hit(h.owner_table, h.owner_id, h.body, score,
-                                h.session_id, h.extra, ts))
+                                h.session_id, h.extra, ts, snippet=h.snippet))
         adjusted.sort(key=lambda h: -h.score)
         self.last_stats["reranked"] = len(adjusted)
         final = self._mmr(adjusted, limit)

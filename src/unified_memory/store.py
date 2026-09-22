@@ -245,6 +245,7 @@ class Hit:
     session_id: str = ""
     extra: str = ""
     created_at: float = 0.0  # v0.4-п.3: штампует Router для recency-приора
+    snippet: str = ""  # A4: FTS-сниппет (только FTS-плечо), тело остаётся полным
 
 
 # ADR-001: закрытые словари связей. Расширение — миграцией (CHECK + DDL).
@@ -825,14 +826,16 @@ class Store:
         if self.fts and max(len(t) for t in terms) >= 3:
             match = " OR ".join(f'"{t}"' for t in terms[:10] if len(t) >= 3)
             ph = ",".join("?" * len(tables))
-            q = ("SELECT owner_table, owner_id FROM um_fts"
+            q = ("SELECT owner_table, owner_id,"
+                 " snippet(um_fts, 2, '[', ']', '…', 8) FROM um_fts"
                  f" WHERE um_fts MATCH ? AND owner_table IN ({ph})"
                  " ORDER BY rank LIMIT ?")
             try:
                 rows = self.conn.execute(q, (match, *tables, limit * 3)).fetchall()
             except sqlite3.OperationalError:
                 rows = []
-            cand = [(ot, oid) for ot, oid in rows if ot in tables]
+            cand = [(ot, oid) for ot, oid, _ in rows if ot in tables]
+            snips = {(ot, oid): sn for ot, oid, sn in rows if ot in tables}
             owners = self.owners_for(cand) if owner else {}
             expired: set = set()
             if as_of is not None:
@@ -855,7 +858,8 @@ class Store:
                 if scope == "session" and ot in ("um_messages", "um_edges", "um_summaries") \
                         and sid != session_id:
                     continue
-                hits.append(Hit(ot, oid, body, 1.0, sid))
+                hits.append(Hit(ot, oid, body, 1.0, sid,
+                                snippet=snips.get((ot, oid), "")))
                 if len(hits) >= limit:
                     break
             return hits

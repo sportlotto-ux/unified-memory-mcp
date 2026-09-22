@@ -182,9 +182,12 @@ def mem_recall(query: str, scope: str = "all", session_id: str = "",
                          diagnostics=diagnostics)
     out = []
     for h in hits:
-        body = h.body[:2000]
-        if len(h.body) > 2000:
-            body += "…[truncated, use mem_expand for full text]"
+        if h.snippet and len(h.body) > 2000:  # A4: сниппет только для ДЛИННЫХ FTS-тел
+            body = h.snippet
+        else:  # короткие — verbatim; прочие плечи — прежний head-truncate
+            body = h.body[:2000]
+            if len(h.body) > 2000:
+                body += "…[truncated, use mem_expand for full text]"
         out.append({"kind": h.owner_table, "id": h.owner_id,
                     "score": round(h.score, 4), "session": h.session_id,
                     "body": body})

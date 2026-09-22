@@ -218,3 +218,28 @@ def test_hygiene_no_vectors_no_duplicate_scan(tmp_path):
         assert s.hygiene()["duplicate_facts"] == []
     finally:
         s.close()
+
+
+# ---------- v0.7.3 A4: FTS-сниппет (extra, тело полное) ----------
+
+def test_fts_snippet_in_extra_not_body(tmp_path):
+    s = _store(tmp_path)
+    try:
+        long = ("про бюджет и планы " * 40).strip()
+        s.add_message("s", "user", long)
+        hits = s.fts_search("бюджет", scope="all", limit=3)
+        assert hits
+        assert hits[0].body == long          # тело не подменяется сниппетом
+        assert "бюджет" in hits[0].snippet
+        assert len(hits[0].snippet) < len(long)
+    finally:
+        s.close()
+
+
+def test_recall_shows_fts_snippet(srv):
+    long = ("про бюджет и планы " * 150).strip()  # > 2000 символов
+    srv.mem_remember(session_id="s", role="user", content=long)
+    out = json.loads(srv.mem_recall(query="бюджет", scope="all"))
+    assert out and out[0]["body"] != long
+    assert "бюджет" in out[0]["body"]
+    assert "truncated" not in out[0]["body"]

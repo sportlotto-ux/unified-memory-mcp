@@ -126,7 +126,8 @@ def test_counter_subtracts_superseded(ing):
     assert int(ing.store.meta_get("tokens:s1")) == expect
 
 
-def test_recall_truncation_marked(tmp_path, monkeypatch):
+def test_recall_long_body_snippet_bounded(tmp_path, monkeypatch):
+    """A4 (v0.7.3): длинное FTS-тело отдаётся bounded-сниппетом, не маркером усечения."""
     monkeypatch.setenv("UM_DATABASE_PATH", str(tmp_path / "g.db"))
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("UM_EMBEDDING_MODEL",
@@ -137,7 +138,11 @@ def test_recall_truncation_marked(tmp_path, monkeypatch):
         srv.mem_remember(session_id="s", content="длинный текст " * 500)
         import json
         hits = json.loads(srv.mem_recall(query="длинный"))
-        assert hits and hits[0]["body"].endswith("…[truncated, use mem_expand for full text]")
+        assert hits
+        body = hits[0]["body"]
+        assert "длинный" in body
+        assert len(body) < 4000  # сниппет, а не 2000+ превью
+        assert "…[truncated, use mem_expand for full text]" not in body
     finally:
         srv._STATE["store"].close()
         srv._STATE.update(ingest=None, store=None, cfg=None)
