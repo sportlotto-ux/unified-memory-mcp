@@ -166,6 +166,14 @@ class Ingest:
         """Один op батча. Текст — через _clean (redaction-гейт, guardrail п.5)."""
         from .recent import parse_when
         kind = str(op.get("op") or "").strip()
+        if kind == "remember":
+            sid = str(op.get("session_id", ""))
+            out = self.remember_message(
+                sid, str(op.get("role", "user")) or "user",
+                str(op.get("content", "")), str(op.get("source", "mcp")) or "mcp",
+                owner, _commit=False)
+            return {"index": i, "op": kind, "status": "remembered",
+                    "id": out["id"]}, sid
         if kind == "remember_fact":
             out = self.upsert_fact(
                 self._clean(str(op.get("category", ""))),
@@ -217,7 +225,7 @@ class Ingest:
             else:
                 raise ValueError(f"unknown kind {k!r}: fact | edge | link")
             return {"index": i, "op": kind, "kind": k, "deleted": deleted}, None
-        raise ValueError(f"unknown op {kind!r}: remember_fact | update | forget")
+        raise ValueError(f"unknown op {kind!r}: remember | remember_fact | update | forget")
 
     def compact_session(self, session_id: str, keep_tail: int = 20,                        max_sentences: int = 8, owner: str = "") -> dict:
         """Ручное сжатие. Уважает frontier: уже покрытое не дублирует (2.2)."""

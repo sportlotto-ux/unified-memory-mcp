@@ -382,7 +382,8 @@ def mem_evidence(claim: str = "", refs: list[str] | None = None,
 def mem_batch(ops: list[dict] | None = None, dry_run: bool = False,
               owner: str = "") -> str:
     """Atomic batch of writes (all-or-nothing). ops: list of
-    {"op":"remember_fact", category, name, body, importance?, subject?, predicate?, object?, session_id?}
+    {"op":"remember", session_id, role?, content, source?}
+    | {"op":"remember_fact", category, name, body, importance?, subject?, predicate?, object?, session_id?}
     | {"op":"update", kind:"fact|edge|link", id, body?, importance?, valid_until?}
     | {"op":"forget", kind:"fact|edge|link", id}.
     dry_run=true validates then rolls back (applied=false). No cross-refs: ids from
