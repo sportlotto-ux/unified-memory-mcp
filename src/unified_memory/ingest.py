@@ -42,7 +42,8 @@ class Ingest:
                                   self.backend.embed_docs([f"{name} {body}"])[0],
                                   self.backend.spec.name)
         if subject and predicate and obj:
-            eid = self.store.add_edge(subject, predicate, obj, session_id)
+            eid = self.store.add_edge(subject, predicate, obj, session_id,
+                                      fact_id=fid)
             if self.backend is not None:
                 self.store.add_vector(
                     "um_edges", eid,

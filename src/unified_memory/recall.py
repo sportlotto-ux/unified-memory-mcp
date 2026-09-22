@@ -46,7 +46,7 @@ class Router:
             lists.append(fts_hits)
         if self.backend is not None:
             qv = self.backend.embed_query(query)
-            tables = {"all": None, "session": ["um_messages", "um_summaries"],
+            tables = {"all": None, "session": ["um_messages", "um_summaries", "um_edges"],
                       "facts": ["um_facts"]}.get(scope)
             scored = []
             for ot, oid, vec in self.store.all_vectors(tables):
@@ -55,22 +55,24 @@ class Router:
                 body, sid = self.store._body_of(ot, oid)
                 if body is None:
                     continue
-                if scope == "session" and ot == "um_messages" and sid != session_id:
+                if scope == "session" and ot in ("um_messages", "um_edges") \
+                        and sid != session_id:
                     continue
                 scored.append(Hit(ot, oid, body, cosine(qv, vec), sid))
             scored.sort(key=lambda h: -h.score)
             if scored:
                 lists.append(scored[:limit * 2])
-        if not lists:
-            return []
-        graph_hits = self._graph_arm(query, scope, limit * 2)
+        graph_hits = self._graph_arm(query, scope, session_id, limit * 2)
         if graph_hits:
             lists.append(graph_hits)
+        if not lists:
+            return []
         if len(lists) == 1:
             return lists[0][:limit]
         return rrf_fuse(lists)[:limit]
 
-    def _graph_arm(self, query: str, scope: str, limit: int) -> list[Hit]:
+    def _graph_arm(self, query: str, scope: str, session_id: str,
+                   limit: int) -> list[Hit]:
         """1-hop expansion: совпавшие сущности -> их рёбра."""
         if scope == "facts":
             return []
@@ -80,7 +82,8 @@ class Router:
         hits: list[Hit] = []
         seen: set[int] = set()
         for ent in self.store.match_entities(terms, limit=5):
-            for nb in self.store.neighbors(ent):
+            for nb in self.store.neighbors(
+                    ent, session_id if scope == "session" else ""):
                 eid = nb["edge_id"]
                 if eid in seen:
                     continue
