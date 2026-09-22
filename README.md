@@ -88,7 +88,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 | `mem_assemble` | Bounded активный контекст: summaries + свежий хвост в бюджет токенов (бюджет считается токен-оценщиком; для жёсткой арифметики — `.[tokens]`) |
 | `mem_forget` | Удаление по `kind`: `fact`/`edge`/`link` (id) или `entity` (имя), каскадом |
 | `mem_status` | Счётчики + флаги деградации (`vectors_enabled`, `summarizer`, `fts`) |
-| `mem_doctor` | `integrity_check`, вектора по моделям, hygiene; read-only `export` (JSON-дамп в `<db>.export-<ts>.json`, вектора base64, архив не входит); мутации `clean`/`repair` (backup-first), `archive`/`purge`/`retention` (только с `apply=true`; `retention` — age-based вынос горячего старше `UM_RETENTION_DAYS`) |
+| `mem_doctor` | `integrity_check`, вектора по моделям, hygiene; read-only `export` (JSON-дамп в `<db>.export-<ts>.json`, вектора base64, архив не входит), `archive_check` (заглушки ↔ архив, orphans), `secret_scan` (каталог redaction, отчёт без значений); мутации `clean`/`repair` (backup-first), `archive`/`purge`/`retention` (только с `apply=true`; `retention` — age-based вынос горячего старше `UM_RETENTION_DAYS`) |
 
 ## Как это работает
 
@@ -151,7 +151,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 ## Разработка
 
 ```bash
-python -m pytest tests/ -q   # 239 passed, 5 skipped без fastembed/vec/tiktoken; UM_LIVE_OPENAI=1 — live против 8127
+python -m pytest tests/ -q   # 252 passed, 5 skipped без fastembed/vec/tiktoken; UM_LIVE_OPENAI=1 — live против 8127
 ```
 
 Прогон герметичен: `tests/conftest.py` снимает ambient `UM_*` (иначе шелл с

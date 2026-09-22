@@ -24,6 +24,8 @@ try:  # mcp 2.x: FastMCP renamed to MCPServer
 except ImportError:  # mcp 1.x
     from mcp.server.fastmcp import FastMCP as _Server  # type: ignore
 
+from mcp.types import ToolAnnotations  # noqa: E402
+
 from unified_memory.config import load  # noqa: E402
 from unified_memory.embeddings import make_backend  # noqa: E402
 from unified_memory.ingest import Ingest  # noqa: E402
@@ -35,6 +37,13 @@ from unified_memory.evidence import (  # noqa: E402
     parse_ref, run_cite, run_compute, run_conflicts)
 
 mcp = _Server("unified-memory")
+
+
+def _ann(ro: bool = False, destr: bool = False, idem: bool = False,
+         ow: bool = False) -> ToolAnnotations:
+    """C11: поведенческие хинты тула (v0.7.3). Все тулы — локальный стор (ow=False)."""
+    return ToolAnnotations(read_only_hint=ro, destructive_hint=destr,
+                           idempotent_hint=idem, open_world_hint=ow)
 
 _STATE = {"ingest": None, "store": None, "cfg": None, "backend_error": None}
 _INIT_LOCK = threading.Lock()  # FastMCP гоняет sync-тулы в тредах: двойная проверка
@@ -122,7 +131,7 @@ def _store():
     return _STATE["store"]
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ann())
 def mem_remember(session_id: str = "default", role: str = "user",
                  content: str = "", owner: str = "") -> str:
     """Save a session message. Auto-compacts past the pressure threshold."""
@@ -130,7 +139,7 @@ def mem_remember(session_id: str = "default", role: str = "user",
                                                  owner=owner))
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ann())
 def mem_fact(category: str, name: str, body: str,
              importance: float = 0.5, subject: str = "",
              predicate: str = "", object: str = "",
@@ -141,7 +150,7 @@ def mem_fact(category: str, name: str, body: str,
         session_id, owner)})
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ann(idem=True))
 def mem_link(src: str, dst: str, rel: str, weight: float = 1.0,
              session_id: str = "", owner: str = "") -> str:
     """Typed memory link (ADR-001). src/dst like 'fact:3' | 'message:12' |
@@ -155,7 +164,7 @@ def mem_link(src: str, dst: str, rel: str, weight: float = 1.0,
     return json.dumps(out, ensure_ascii=False)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ann(ro=True, idem=True))
 def mem_recall(query: str, scope: str = "all", session_id: str = "",
                limit: int = 10, owner: str = "",
                include_expired: bool = False, as_of: str = "",
@@ -198,7 +207,7 @@ def mem_recall(query: str, scope: str = "all", session_id: str = "",
     return json.dumps(out, ensure_ascii=False)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ann(ro=True, idem=True))
 def mem_expand(kind: str, id: int, owner: str = "") -> str:
     """Verbatim fetch. kind: message | fact | summary | edge. Uniform schema."""
     if kind == "message":
@@ -230,7 +239,7 @@ def mem_expand(kind: str, id: int, owner: str = "") -> str:
                       ensure_ascii=False)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ann())
 def mem_update(kind: str = "fact", id: int = 0, body: str = "",
                importance: float = -1.0, valid_until: str = "",
                owner: str = "") -> str:
@@ -261,21 +270,21 @@ def mem_update(kind: str = "fact", id: int = 0, body: str = "",
     raise ValueError(f"unknown kind {kind!r}: fact | edge | link")
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ann(idem=True))
 def mem_compact(session_id: str, keep_tail: int = 20, owner: str = "") -> str:
     """Summarize old session messages. Raw messages are kept (lossless)."""
     return json.dumps(_ingest().compact_session(session_id, keep_tail,
                                                 owner=owner))
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ann(ro=True, idem=True))
 def mem_assemble(session_id: str, budget: int = 0, owner: str = "") -> str:
     """Bounded active context: ready summaries + fresh tail within budget."""
     return json.dumps(_ingest().window.assemble(session_id, budget, owner),
                       ensure_ascii=False)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ann(destr=True, idem=True))
 def mem_forget(id: str = "", kind: str = "fact", owner: str = "") -> str:
     """Delete by kind: fact (numeric id), edge (numeric id), link (numeric id), entity (name)."""
     if kind in ("fact", "edge", "link"):
@@ -295,13 +304,13 @@ def mem_forget(id: str = "", kind: str = "fact", owner: str = "") -> str:
     raise ValueError(f"unknown kind {kind!r}: fact | edge | link | entity")
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ann(idem=True))
 def mem_reindex(owner: str = "") -> str:
     """Embed owners missing vectors (ladder after a model change). Idempotent."""
     return json.dumps(_ingest().reindex(owner=owner))
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ann(ro=True, idem=True))
 def mem_recent(period: str = "today", session_id: str = "",
                owner: str = "", limit: int = 20) -> str:
     """Temporal: what happened in a UTC window. Period: today | yesterday | week | month | Nd | date:YYYY-MM-DD | last Nh."""
@@ -337,7 +346,7 @@ def _archive_fetch(cfg):
     return fetch
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ann(ro=True, idem=True))
 def mem_evidence(claim: str = "", refs: list[str] | None = None,
                  mode: str = "cite", op: str = "count",
                  pattern: str = "", owner: str = "") -> str:
@@ -369,7 +378,7 @@ def mem_evidence(claim: str = "", refs: list[str] | None = None,
     return json.dumps(out, ensure_ascii=False)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ann(destr=True))
 def mem_batch(ops: list[dict] | None = None, dry_run: bool = False,
               owner: str = "") -> str:
     """Atomic batch of writes (all-or-nothing). ops: list of
@@ -432,7 +441,7 @@ def _secret_scan(store, patterns, cap: int = 50) -> dict:
     return {"hits": hits, "total": total, "cap": cap, "patterns": active}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ann(ro=True, idem=True))
 def mem_status() -> str:
     """Store stats and degradation flags."""
     ing = _ingest()
@@ -464,7 +473,7 @@ def mem_status() -> str:
                        "archive": arch})
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ann(destr=True))
 def mem_doctor(mode: str = "check", apply: bool = False) -> str:
     """DB diagnostics. mode: check (readonly: diagnostics + hygiene candidates) |
     export (readonly JSON dump to <db>.export-<ts>.json) |
