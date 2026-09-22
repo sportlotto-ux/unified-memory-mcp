@@ -74,8 +74,12 @@ class ActiveWindow:
         fresh_ids = {m["id"] for m in fresh}
         head = [m for m in msgs if m["id"] not in fresh_ids]
         if head:
-            body = self.summarizer.summarize(
-                [m["content"] for m in head], max_sentences=8)
+            try:
+                body = self.summarizer.summarize(
+                    [m["content"] for m in head], max_sentences=8)
+            except Exception as e:  # noqa: BLE001 — сжатие не роняет запись
+                return {"status": "degraded", **base,
+                        "error": f"{type(e).__name__}: {e}"[:200]}
             sid = self.store.add_summary(session_id, body, depth=0,
                                          covers_from=head[0]["id"],
                                          covers_to=head[-1]["id"])

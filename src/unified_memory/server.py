@@ -91,9 +91,12 @@ def mem_recall(query: str, scope: str = "all", session_id: str = "",
 
 @mcp.tool()
 def mem_expand(kind: str, id: int) -> str:
-    """Verbatim fetch. kind: message | fact | summary | edge."""
+    """Verbatim fetch. kind: message | fact | summary | edge. Uniform schema."""
     if kind == "message":
-        return json.dumps(_store().get_message(int(id)), ensure_ascii=False)
+        msg = _store().get_message(int(id))
+        return json.dumps({"kind": kind, "id": int(id),
+                           "body": msg["content"] if msg else None},
+                          ensure_ascii=False)
     table = {"fact": "um_facts", "summary": "um_summaries",
              "edge": "um_edges"}.get(kind)
     if table is None:
@@ -118,13 +121,25 @@ def mem_assemble(session_id: str, budget: int = 0) -> str:
 @mcp.tool()
 def mem_forget(id: str = "", kind: str = "fact") -> str:
     """Delete by kind: fact (numeric id), edge (numeric id), entity (name)."""
-    if kind == "fact":
-        return json.dumps({"deleted": _store().delete_fact(int(id))})
-    if kind == "edge":
-        return json.dumps({"deleted": _store().delete_edge(int(id))})
+    if kind in ("fact", "edge"):
+        try:
+            oid = int(id)
+        except (TypeError, ValueError):
+            raise ValueError(f"kind={kind!r} needs a numeric id, got {id!r}")
+        if kind == "fact":
+            return json.dumps({"deleted": _store().delete_fact(oid)})
+        return json.dumps({"deleted": _store().delete_edge(oid)})
     if kind == "entity":
+        if not (id or "").strip():
+            raise ValueError("kind='entity' needs a name")
         return json.dumps({"deleted": _store().delete_entity(id)})
     raise ValueError(f"unknown kind {kind!r}: fact | edge | entity")
+
+
+@mcp.tool()
+def mem_reindex() -> str:
+    """Embed owners missing vectors (ladder after a model change). Idempotent."""
+    return json.dumps(_ingest().reindex())
 
 
 @mcp.tool()

@@ -69,13 +69,16 @@ class EndpointSummarizer:
             raise ValueError("UM_SUMMARIZER_URL and UM_SUMMARIZER_MODEL are required")
 
     def summarize(self, texts: list[str], max_sentences: int = 8) -> str:
+        joined = "\n\n".join(texts)
+        if len(joined) > 12000:
+            joined = joined[:12000] + "\n…[truncated for endpoint]"
         payload = {
             "model": self.model,
             "messages": [
                 {"role": "system",
                  "content": f"Condense the conversation into at most {max_sentences} "
                             "sentences. Keep facts, names, numbers, decisions. No preamble."},
-                {"role": "user", "content": "\n\n".join(texts)},
+                {"role": "user", "content": joined},
             ],
             "temperature": 0.1,
         }

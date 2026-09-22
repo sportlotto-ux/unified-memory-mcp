@@ -28,10 +28,14 @@ def rrf_fuse(rank_lists: list[list[Hit]], k: int = _RRF_K) -> list[Hit]:
     return out
 
 
+VALID_SCOPES = ("all", "session", "facts")
+
+
 class Router:
     def __init__(self, store: Store, backend: EmbeddingBackend | None = None) -> None:
         self.store = store
         self.backend = backend
+        self.last_stats: dict = {}
 
     @property
     def vectors_enabled(self) -> bool:
@@ -39,8 +43,13 @@ class Router:
 
     def recall(self, query: str, scope: str = "all", session_id: str = "",
                limit: int = 10) -> list[Hit]:
+        if scope not in VALID_SCOPES:
+            raise ValueError(f"unknown scope {scope!r}: {VALID_SCOPES}")
+        if limit <= 0:
+            return []
         if scope == "session" and not session_id:
             return []  # #5: без session_id граф/поиск вернули бы чужие данные
+        self.last_stats = {"dim_skipped": 0}
         lists: list[list[Hit]] = []
         fts_hits = self.store.fts_search(query, scope=scope, session_id=session_id,
                                          limit=limit * 2)
@@ -49,14 +58,19 @@ class Router:
         if self.backend is not None:
             qv = self.backend.embed_query(query)
             tables = {"all": None, "session": ["um_messages", "um_summaries", "um_edges"],
-                      "facts": ["um_facts"]}.get(scope)
+                      "facts": ["um_facts"]}[scope]
+            # Batch: все вектора одним проходом, тела — bodies_for (макс. 4 запроса).
+            all_vecs = self.store.all_vectors(tables)
+            cand = [(ot, oid, vec) for ot, oid, vec in all_vecs
+                    if len(vec) == len(qv)]
+            self.last_stats["dim_skipped"] = len(all_vecs) - len(cand)
+            bodies = self.store.bodies_for([(ot, oid) for ot, oid, _ in cand])
             scored = []
-            for ot, oid, vec in self.store.all_vectors(tables):
-                if len(vec) != len(qv):
-                    continue  # чужой dim — пропускаем, не падаем
-                body, sid = self.store._body_of(ot, oid)
-                if body is None:
+            for ot, oid, vec in cand:
+                found = bodies.get((ot, oid))
+                if not found or found[0] is None:
                     continue
+                body, sid = found
                 if scope == "session" and ot in ("um_messages", "um_edges", "um_summaries") \
                         and sid != session_id:
                     continue

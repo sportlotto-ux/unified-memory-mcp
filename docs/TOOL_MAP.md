@@ -30,4 +30,5 @@
 
 ## Итого поверхность: ~40 тулов → ~8
 
-`mem_remember mem_recall mem_expand mem_fact mem_evidence mem_forget mem_status mem_doctor`
+`mem_remember mem_recall mem_expand mem_fact mem_compact mem_assemble mem_forget mem_status mem_doctor mem_reindex`
+(плюс отложенный `mem_evidence`)

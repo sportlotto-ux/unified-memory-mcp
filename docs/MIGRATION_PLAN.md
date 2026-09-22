@@ -13,7 +13,7 @@ Cloud embedding-бэкенды не тянули (только fastembed + FTS-o
 ## Этап 4 🟡 — чистка и остаток
 Адаптеров не возникло (ядро писалось с нуля по картам — MODULE_MAP/TOOL_MAP актуальны
 как разбор апстримов). Остаток: `mem_evidence`, temporal rollups, sqlite-vec,
-redaction гейт, user-isolation, `UM_VEC_TYPE`. См. «Известные ограничения» в README.
+redaction гейт, user-isolation. См. «Известные ограничения» в README.
 
 ## Риски
 1. **Форк-расхождение**: апстримы живые. Митигация — этапы 1–3 адаптерами

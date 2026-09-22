@@ -70,7 +70,8 @@ CREATE TABLE IF NOT EXISTS um_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 -- Сущности канонизируются по lower().strip(); вектора — в um_vectors.
 CREATE TABLE IF NOT EXISTS um_entities (
     id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL UNIQUE,   -- каноническое: lower().strip()
+    display TEXT NOT NULL DEFAULT '',  -- исходное написание («Иван», не «иван»)
     created_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS um_edges (
@@ -170,6 +171,11 @@ class Store:
             self.conn.execute(
                 "ALTER TABLE um_summaries ADD COLUMN superseded_by INTEGER NOT NULL DEFAULT 0")
             self.conn.commit()
+        ecols = [r[1] for r in self.conn.execute("PRAGMA table_info(um_entities)")]
+        if "display" not in ecols:
+            self.conn.execute("ALTER TABLE um_entities ADD COLUMN display TEXT NOT NULL DEFAULT ''")
+            self.conn.execute("UPDATE um_entities SET display=name WHERE display=''")
+            self.conn.commit()
         try:
             self.conn.executescript(_FTS_SCHEMA)
             self.fts = True
@@ -208,7 +214,8 @@ class Store:
         """#3: инкрементный счётчик давления. Вызывать из locked-контекста."""
         self.conn.execute(
             "INSERT INTO um_meta(key, value) VALUES(?,?)"
-            " ON CONFLICT(key) DO UPDATE SET value=value+excluded.value",
+            " ON CONFLICT(key) DO UPDATE"
+            " SET value=CAST(value AS INTEGER)+CAST(excluded.value AS INTEGER)",
             (f"tokens:{session_id}", str(delta)))
 
     @_locked
@@ -318,8 +325,12 @@ class Store:
             return []
         tables = {"all": ["um_messages", "um_summaries", "um_facts", "um_edges"],
                   "session": ["um_messages", "um_summaries", "um_edges"],
-                  "facts": ["um_facts"]}.get(
-                      scope, ["um_messages", "um_summaries", "um_facts", "um_edges"])
+                  "facts": ["um_facts"]}
+        if scope not in tables:
+            from .recall import VALID_SCOPES
+
+            raise ValueError(f"unknown scope {scope!r}: {VALID_SCOPES}")
+        tables = tables[scope]
         if self.fts and max(len(t) for t in terms) >= 3:
             match = " OR ".join(f'"{t}"' for t in terms[:10] if len(t) >= 3)
             q = ("SELECT owner_table, owner_id FROM um_fts WHERE um_fts MATCH ? LIMIT ?")
@@ -393,7 +404,7 @@ class Store:
             return ((r[0], r[1]) if r else (None, ""))
         if owner_table == "um_edges":
             r = self.conn.execute(
-                """SELECT s.name, e.predicate, o.name, e.session_id FROM um_edges e
+                """SELECT s.display, e.predicate, o.display, e.session_id FROM um_edges e
                    JOIN um_entities s ON s.id = e.subject_id
                    JOIN um_entities o ON o.id = e.object_id
                    WHERE e.id=?""", (owner_id,)).fetchone()
@@ -439,6 +450,44 @@ class Store:
                (SELECT id FROM um_entities)""")
         self.conn.commit()
         return cur.rowcount > 0
+
+    @_locked
+    def bodies_for(self, refs: list[tuple[str, int]]) -> dict[tuple[str, int], tuple[str | None, str]]:
+        """Batch-версия _body_of: 1 запрос на таблицу вместо N+1."""
+        out: dict[tuple[str, int], tuple[str | None, str]] = {}
+        by_table: dict[str, list[int]] = {}
+        for ot, oid in refs:
+            by_table.setdefault(ot, []).append(oid)
+        for ot, oids in by_table.items():
+            ph = ",".join("?" * len(oids))
+            if ot == "um_messages":
+                rows = self.conn.execute(
+                    f"SELECT id, content, session_id FROM um_messages WHERE id IN ({ph})",
+                    oids).fetchall()
+                for oid, body, sid in rows:
+                    out[(ot, oid)] = (body, sid)
+            elif ot == "um_summaries":
+                rows = self.conn.execute(
+                    f"SELECT id, body, session_id FROM um_summaries WHERE id IN ({ph})",
+                    oids).fetchall()
+                for oid, body, sid in rows:
+                    out[(ot, oid)] = (body, sid)
+            elif ot == "um_facts":
+                rows = self.conn.execute(
+                    f"SELECT id, name, body FROM um_facts WHERE id IN ({ph})",
+                    oids).fetchall()
+                for oid, name, body in rows:
+                    out[(ot, oid)] = (f"{name}: {body}", "")
+            elif ot == "um_edges":
+                rows = self.conn.execute(
+                    f"""SELECT e.id, s.display, e.predicate, o.display, e.session_id
+                        FROM um_edges e
+                        JOIN um_entities s ON s.id = e.subject_id
+                        JOIN um_entities o ON o.id = e.object_id
+                        WHERE e.id IN ({ph})""", oids).fetchall()
+                for oid, sname, pred, oname, sid in rows:
+                    out[(ot, oid)] = (f"{sname} --{pred}--> {oname}", sid)
+        return out
 
     @_locked
     def has_vector(self, owner_table: str, owner_id: int) -> bool:
@@ -505,7 +554,8 @@ class Store:
         if row:
             return row[0]
         cur = self.conn.execute(
-            "INSERT INTO um_entities(name, created_at) VALUES(?,?)", (key, _t.time()))
+            "INSERT INTO um_entities(name, display, created_at) VALUES(?,?,?)",
+            (key, name.strip(), _t.time()))
         self.conn.commit()
         return cur.lastrowid
 
@@ -525,14 +575,15 @@ class Store:
         return eid
 
     @_locked
-    def neighbors(self, entity_name: str, session_id: str = "") -> list[dict]:
+    def neighbors(self, entity_name: str, session_id: str = "",
+                  limit: int = 100) -> list[dict]:
         key = entity_name.strip().lower()
         row = self.conn.execute(
             "SELECT id FROM um_entities WHERE name=?", (key,)).fetchone()
         if not row:
             return []
         eid = row[0]
-        q = """SELECT e.id, s.name, e.predicate, o.name, e.session_id
+        q = """SELECT e.id, s.display, e.predicate, o.display, e.session_id
                FROM um_edges e
                JOIN um_entities s ON s.id = e.subject_id
                JOIN um_entities o ON o.id = e.object_id
@@ -541,6 +592,8 @@ class Store:
         if session_id:
             q += " AND e.session_id = ?"
             params.append(session_id)
+        q += " LIMIT ?"
+        params.append(limit)
         rows = self.conn.execute(q, params).fetchall()
         return [dict(zip(["edge_id", "subject", "predicate", "object", "session_id"], r))
                 for r in rows]
@@ -549,9 +602,10 @@ class Store:
     def match_entities(self, terms: list[str], limit: int = 10) -> list[str]:
         out = []
         for t in terms[:8]:
+            esc = t.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             for r in self.conn.execute(
-                    "SELECT name FROM um_entities WHERE name LIKE ? LIMIT ?",
-                    (f"%{t}%", limit)):
+                    "SELECT name FROM um_entities WHERE name LIKE ? ESCAPE '\\' LIMIT ?",
+                    (f"%{esc}%", limit)):
                 if r[0] not in out:
                     out.append(r[0])
         return out[:limit]

@@ -20,7 +20,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Protocol
+from typing import Protocol
 
 
 # dim зафиксированы за реестром fastembed на момент написания.
@@ -37,6 +37,9 @@ class ModelSpec:
 MODEL_REGISTRY: dict[str, ModelSpec] = {
     # Легаси mnemosyne-дефолт (English-only).
     "BAAI/bge-small-en-v1.5": ModelSpec("BAAI/bge-small-en-v1.5", 384),
+    # Популярный лёгкий стенд.
+    "sentence-transformers/all-MiniLM-L6-v2": ModelSpec(
+        "sentence-transformers/all-MiniLM-L6-v2", 384),
     # Активная модель стенда 09.2026 (mnemosyne + skill-recall + rerank делят её).
     "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2": ModelSpec(
         "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2", 384, multilingual=True
@@ -62,6 +65,7 @@ DEFAULT_MODEL = os.environ.get(
 
 class EmbeddingBackend(Protocol):
     dim: int
+    model_name: str
 
     def embed_docs(self, texts: list[str]) -> list[list[float]]: ...
     def embed_query(self, text: str) -> list[float]: ...
@@ -110,6 +114,10 @@ class FastembedBackend:
     def warm(self) -> None:
         self._ensure()
 
+    @property
+    def model_name(self) -> str:
+        return self._model_name
+
 
 def check_store_dim(expected_dim: int, model_name: str, meta_getter) -> None:
     """Сверить dim стора с активной моделью. Вызывать при open() БД.
@@ -128,17 +136,6 @@ def check_store_dim(expected_dim: int, model_name: str, meta_getter) -> None:
             f"active model {model_name!r} (dim={expected_dim}). "
             "Запусти reindex, смена модели без него роняет recall молча."
         )
-
-
-def chunked(texts: Iterable[str], n: int) -> Iterable[list[str]]:
-    buf: list[str] = []
-    for t in texts:
-        buf.append(t)
-        if len(buf) >= n:
-            yield buf
-            buf = []
-    if buf:
-        yield buf
 
 
 if __name__ == "__main__":  # smoke-test: python -m unified_memory.embeddings

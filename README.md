@@ -40,14 +40,15 @@ export UM_SUMMARIZER_MODEL=qwen3:8b
 }
 ```
 
-## Тулы (9)
+## Тулы (10)
 
 | Тул | Что делает |
 |---|---|
 | `mem_remember` | Сохранить сообщение; авто-компакшн при превышении порога давления |
 | `mem_fact` | Сохранить долгий факт + опциональный триплет графа (`subject`, `predicate`, `object`) |
 | `mem_recall` | Единый поиск: FTS + вектора + граф (1-hop) + RRF. `scope`: `all`/`session`/`facts` |
-| `mem_expand` | Дословно по `kind`+`id` (`message`/`fact`/`summary`/`edge`) |
+| `mem_expand` | Дословно по `kind`+`id`, единая схема `{kind,id,body}` |
+| `mem_reindex` | Доложит недостающие вектора (лестница после смены модели) |
 | `mem_compact` | Ручное сжатие старых сообщений (сырьё остаётся) |
 | `mem_assemble` | Bounded активный контекст: summaries + свежий хвост в бюджет токенов |
 | `mem_forget` | Удаление по `kind`: `fact`/`edge` (id) или `entity` (имя), каскадом |
@@ -80,13 +81,13 @@ export UM_SUMMARIZER_MODEL=qwen3:8b
 
 - Нет user-isolation: один стор на инсталляцию, мультитенантность не предусмотрена.
 - Нет redaction чувствительных данных (у LCM есть `SENSITIVE_PATTERNS`) — не кладите секреты или чистите руками.
-- `UM_VEC_TYPE` объявлен, но не реализован (вектора всегда float32).
+- `UM_VEC_TYPE` удалён: вектора всегда float32, конфиг больше не врёт.
 - Смена embedding-модели требует reindex (зато громко падает, а не молча врёт — см. `DimensionMismatchError`). Ранние сторa на MiniLM-384 с дефолтом mpnet-768 несовместимы: пересоздайте БД или задайте `UM_EMBEDDING_MODEL` явно.
 
 ## Разработка
 
 ```bash
-python -m pytest tests/ -q   # 39 passed, 1 skipped без fastembed
+python -m pytest tests/ -q   # 50 passed, 1 skipped без fastembed
 ```
 
 Roadmap и разбор апстримов: `docs/MIGRATION_PLAN.md`. Переезд с hermes-lcm/mnemosyne: `docs/IMPORT.md`.

@@ -6,6 +6,7 @@ import math
 
 class FakeBackend:
     dim = 16
+    model_name = "fake/test-16"
     spec_name = "fake/test-16"
 
     class _Spec:
