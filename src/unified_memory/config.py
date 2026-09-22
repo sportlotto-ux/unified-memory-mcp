@@ -103,6 +103,13 @@ def _default_mmr() -> float:
     return _strict_float("UM_MMR_LAMBDA", 0.7)
 
 
+def _default_vec_index() -> str:
+    v = os.environ.get("UM_VEC_INDEX", "auto").strip().lower()
+    if v not in ("auto", "off"):
+        raise ValueError(f"UM_VEC_INDEX must be 'auto' or 'off', got {v!r}")
+    return v
+
+
 def _default_redact_patterns() -> tuple[str, ...]:
     from .redact import ALL, PATTERNS
 
@@ -138,6 +145,8 @@ class Config:
     recency_halflife_days: float = field(default_factory=_default_halflife)
     scope_bias: float = field(default_factory=_default_scope_bias)
     mmr_lambda: float = field(default_factory=_default_mmr)
+    # vec0-индекс (v0.4-п.6): auto = строить в reindex и использовать при совпадении dim.
+    vec_index: str = field(default_factory=_default_vec_index)
 
     def __post_init__(self) -> None:
         if self.embedding_backend not in ("local", "openai"):

@@ -131,6 +131,25 @@ def unpack_vector(blob: bytes) -> list[float]:
     return list(struct.unpack(f"<{n}f", blob))
 
 
+_VEC_MOD = {"mod": None, "tried": False}
+
+# Таблицы, чьи вектора индексируем (um_entities — тоже: граф-arm идёт через вектора).
+_VEC_TABLES = ("um_messages", "um_summaries", "um_facts", "um_edges", "um_entities")
+
+
+def vec_extension_available() -> bool:
+    """sqlite-vec importable? Только импорт (дешёвый); load — в _vec_ensure."""
+    if not _VEC_MOD["tried"]:
+        _VEC_MOD["tried"] = True
+        try:
+            import sqlite_vec
+
+            _VEC_MOD["mod"] = sqlite_vec
+        except ImportError:
+            _VEC_MOD["mod"] = None
+    return _VEC_MOD["mod"] is not None
+
+
 def cosine(a: list[float], b: list[float]) -> float:
     dot = sum(x * y for x, y in zip(a, b))
     na = sum(x * x for x in a) ** 0.5
@@ -189,6 +208,7 @@ class Store:
 
     def __init__(self, cfg: Config, embedding_dim: int = 0, embedding_model: str = "") -> None:
         cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._db_path = str(cfg.db_path)
         self._lock = threading.RLock()
         self.conn = sqlite3.connect(str(cfg.db_path), check_same_thread=False)
         self.conn.execute("PRAGMA journal_mode=WAL")
@@ -345,6 +365,20 @@ class Store:
             " VALUES(?,?,?,?,?)",
             (owner_table, owner_id, pack_vector(vec), model, owner),
         )
+        if self._vec_ready(len(vec)):
+            try:
+                self.conn.execute(
+                    "DELETE FROM um_vecidx WHERE owner_table=? AND owner_id=?",
+                    (owner_table, owner_id))
+                self.conn.execute(
+                    "INSERT INTO um_vecidx(embedding, owner_table, owner_id, owner)"
+                    " VALUES(?,?,?,?)",
+                    (_VEC_MOD["mod"].serialize_float32(vec),
+                     owner_table, owner_id, owner))
+            except Exception:
+                # индекс битый (снесли таблицу вручную) — размечаем как потерянный,
+                # источник правды um_vectors цел, пересборка через reindex
+                self.conn.execute("DELETE FROM um_meta WHERE key='vec_index_dim'")
         self.conn.commit()
 
     @_locked
@@ -520,6 +554,7 @@ class Store:
             if not row or (row[0] or "") != owner:
                 return False
         cur = self.conn.execute("DELETE FROM um_facts WHERE id=?", (fid,))
+        self._vec_delete("um_facts", fid)
         self.conn.execute("DELETE FROM um_vectors WHERE owner_table='um_facts' AND owner_id=?", (fid,))
         if self.fts:
             self.conn.execute(
@@ -649,6 +684,135 @@ class Store:
         return out[:limit]
 
     @_locked
+    def vectors_for(self, refs: list[tuple[str, int]]) -> dict[tuple[str, int], list[float]]:
+        """Batch векторов по (table, id) — KNN-перескоринг косинусом, без фулскана."""
+        out: dict[tuple[str, int], list[float]] = {}
+        by_table: dict[str, list[int]] = {}
+        for ot, oid in refs:
+            by_table.setdefault(ot, []).append(oid)
+        for ot, oids in by_table.items():
+            if ot not in _VEC_TABLES:
+                continue
+            ph = ",".join("?" * len(oids))
+            for oid, blob in self.conn.execute(
+                    "SELECT owner_id, embedding FROM um_vectors"
+                    f" WHERE owner_table=? AND owner_id IN ({ph})", (ot, *oids)):
+                try:
+                    out[(ot, oid)] = unpack_vector(blob)
+                except Exception:
+                    continue
+        return out
+
+    def _vec_ensure(self) -> bool:
+        """Load sqlite-vec в коннект (кеш на инстанс). Без лока — из locked."""
+        if getattr(self, "_vec_loaded", False):
+            return True
+        if not vec_extension_available():
+            return False
+        try:
+            self.conn.enable_load_extension(True)
+            _VEC_MOD["mod"].load(self.conn)
+            self.conn.enable_load_extension(False)
+        except Exception:
+            return False
+        self._vec_loaded = True
+        return True
+
+    def _vec_dim(self) -> int:
+        """Dim активного индекса из um_meta (0 = нет). RLock — из locked."""
+        raw = self.meta_get("vec_index_dim")
+        return int(raw) if raw and raw.isdigit() else 0
+
+    def _vec_ready(self, dim: int) -> bool:
+        """Индекс существует и под этот dim. Без лока — из locked-контекста."""
+        if not dim or self._vec_dim() != dim or not self._vec_ensure():
+            return False
+        return self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='um_vecidx'").fetchone() is not None
+
+    def _vec_delete(self, owner_table: str, owner_id: int) -> None:
+        """Убрать строку из индекса. Без лока — из locked; тихий noop без индекса."""
+        if not self._vec_dim():
+            return
+        try:
+            self.conn.execute(
+                "DELETE FROM um_vecidx WHERE owner_table=? AND owner_id=?",
+                (owner_table, owner_id))
+        except Exception:
+            pass  # индекс снесли вручную — источник правды um_vectors, не он
+
+    @_locked
+    def build_vec_index(self, dim: int) -> int:
+        """Построить/пересобрать vec0-индекс под dim. Источник правды — um_vectors."""
+        if not self._vec_ensure():
+            raise RuntimeError("sqlite-vec unavailable: pip install -e .[local-vec]")
+        if dim <= 0:
+            raise ValueError("build_vec_index needs dim > 0")
+        self.conn.execute("DROP TABLE IF EXISTS um_vecidx")
+        self.conn.execute(
+            "CREATE VIRTUAL TABLE um_vecidx USING vec0("
+            f"embedding float[{int(dim)}],"
+            " owner_table TEXT, owner_id INTEGER, owner TEXT)")
+        ser = _VEC_MOD["mod"].serialize_float32
+        n = 0
+        for ot, oid, blob, own in self.conn.execute(
+                "SELECT owner_table, owner_id, embedding, owner FROM um_vectors"):
+            try:
+                vec = unpack_vector(blob)
+            except Exception:
+                continue
+            if len(vec) != dim:
+                continue
+            self.conn.execute(
+                "INSERT INTO um_vecidx(embedding, owner_table, owner_id, owner)"
+                " VALUES(?,?,?,?)", (ser(vec), ot, oid, own or ""))
+            n += 1
+        self.meta_set("vec_index_dim", str(dim))
+        self.conn.commit()
+        return n
+
+    @_locked
+    def vec_index_status(self) -> dict:
+        if not vec_extension_available():
+            return {"mode": "unavailable"}
+        dim = self._vec_dim()
+        if not dim:
+            return {"mode": "off"}
+        exists = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='um_vecidx'").fetchone()
+        if not exists:
+            return {"mode": "missing", "dim": dim}
+        return {"mode": "ready", "dim": dim}
+
+    @_locked
+    def knn(self, qvec: list[float], tables: list[str] | None,
+            owner: str = "", k: int = 10) -> list[tuple[str, int, float]] | None:
+        """KNN-кандидаты (таблица, id, L2). None = индекс неприменим → brute force.
+
+        По одному запросу на таблицу: vec0 не любит IN в KNN-фильтрах,
+        а пост-фильтр голодал бы топ-k чужими таблицами.
+        """
+        if not self._vec_ready(len(qvec)):
+            return None
+        wanted = [t for t in (tables or list(_VEC_TABLES)) if t in _VEC_TABLES]
+        qblob = _VEC_MOD["mod"].serialize_float32(list(map(float, qvec)))
+        out: list[tuple[str, int, float]] = []
+        for ot in wanted:
+            q = ("SELECT owner_id, distance FROM um_vecidx"
+                 " WHERE embedding MATCH ?"
+                 f" AND k = {int(k)} AND owner_table = ?")
+            params: list = [qblob, ot]
+            if owner:
+                q += " AND owner = ?"
+                params.append(owner)
+            try:
+                rows = self.conn.execute(q, params).fetchall()
+            except Exception:
+                return None  # странный KNN — честный фолбэк, не взрыв
+            out += [(ot, oid, dist) for oid, dist in rows]
+        return out
+
+    @_locked
     def has_vector(self, owner_table: str, owner_id: int) -> bool:
         return self.conn.execute(
             "SELECT 1 FROM um_vectors WHERE owner_table=? AND owner_id=?",
@@ -656,6 +820,7 @@ class Store:
 
     def _drop_edge_rows(self, eid: int) -> None:
         """Без лока — вызывать из locked-контекста."""
+        self._vec_delete("um_edges", eid)
         self.conn.execute("DELETE FROM um_edges WHERE id=?", (eid,))
         self.conn.execute(
             "DELETE FROM um_vectors WHERE owner_table='um_edges' AND owner_id=?", (eid,))
@@ -670,6 +835,13 @@ class Store:
         self.conn.execute(
             """DELETE FROM um_vectors WHERE owner_table='um_entities' AND owner_id NOT IN
                (SELECT id FROM um_entities)""")
+        if self._vec_dim():
+            try:
+                self.conn.execute(
+                    """DELETE FROM um_vecidx WHERE owner_table='um_entities'
+                       AND owner_id NOT IN (SELECT id FROM um_entities)""")
+            except Exception:
+                pass  # индекса нет — нечего чистить
 
     @_locked
     def delete_edge(self, eid: int, owner: str = "") -> bool:
@@ -702,6 +874,7 @@ class Store:
                 "SELECT id FROM um_edges WHERE subject_id=? OR object_id=?",
                 (ent_id, ent_id)):
             self._drop_edge_rows(eid)
+        self._vec_delete("um_entities", ent_id)
         self.conn.execute("DELETE FROM um_entities WHERE id=?", (ent_id,))
         self.conn.execute(
             "DELETE FROM um_vectors WHERE owner_table='um_entities' AND owner_id=?",
@@ -812,7 +985,98 @@ class Store:
             "SELECT model, count(*) FROM um_vectors GROUP BY model").fetchall()
         return {"integrity": integ,
                 "vectors_by_model": [list(r) for r in vec_rows],
+                "vec_index": self.vec_index_status(),
                 "fts": self.fts}
+
+    @_locked
+    def hygiene(self) -> dict:
+        """Кандидаты мусора без мутаций: сироты векторов/FTS/сущностей, висячий vec0."""
+        out: dict = {"orphan_vectors": [], "orphan_fts": [],
+                     "orphan_entities": 0, "dangling_vecidx": []}
+        parents = {"um_messages": "SELECT id FROM um_messages",
+                   "um_summaries": "SELECT id FROM um_summaries",
+                   "um_facts": "SELECT id FROM um_facts",
+                   "um_edges": "SELECT id FROM um_edges",
+                   "um_entities": "SELECT id FROM um_entities"}
+        for ot, psql in parents.items():
+            for (oid,) in self.conn.execute(
+                    "SELECT owner_id FROM um_vectors WHERE owner_table=?"
+                    f" AND owner_id NOT IN ({psql}) LIMIT 11", (ot,)):
+                out["orphan_vectors"].append([ot, oid])
+            if self.fts:
+                try:
+                    rows = self.conn.execute(
+                        "SELECT owner_id FROM um_fts WHERE owner_table=?"
+                        f" AND owner_id NOT IN ({psql}) LIMIT 11", (ot,)).fetchall()
+                except Exception:
+                    rows = []
+                out["orphan_fts"] += [[ot, r[0]] for r in rows]
+        out["orphan_entities"] = self.conn.execute(
+            """SELECT count(*) FROM um_entities WHERE id NOT IN
+               (SELECT subject_id FROM um_edges UNION SELECT object_id FROM um_edges)"""
+        ).fetchone()[0]
+        if self._vec_dim():
+            try:
+                for ot, oid in self.conn.execute(
+                        """SELECT v.owner_table, v.owner_id FROM um_vecidx v
+                           LEFT JOIN um_vectors u ON u.owner_table=v.owner_table
+                           AND u.owner_id=v.owner_id
+                           WHERE u.id IS NULL LIMIT 11"""):
+                    out["dangling_vecidx"].append([ot, oid])
+            except Exception:
+                pass
+        return out
+
+    @_locked
+    def repair(self, dim: int = 0, backup_path: str = "") -> dict:
+        """Backup-first ремонт: бэкап VACUUM INTO, чистка сирот, пересборка FTS/vec.
+
+        dim — размерность для vec-индекса (0 = пропустить vec, только FTS+сироты).
+        """
+        import time as _t
+
+        if not backup_path:
+            backup_path = f"{self._db_path}.backup-{int(_t.time())}"
+        safe_path = backup_path.replace("'", "''")
+        self.conn.execute(f"VACUUM INTO '{safe_path}'")
+        report: dict = {"backup": backup_path}
+        dirty = self.hygiene()
+        for ot, oid in dirty["orphan_vectors"]:
+            self.conn.execute(
+                "DELETE FROM um_vectors WHERE owner_table=? AND owner_id=?",
+                (ot, oid))
+        report["purged_vectors"] = len(dirty["orphan_vectors"])
+        if self.fts:
+            for ot, oid in dirty["orphan_fts"]:
+                self.conn.execute(
+                    "DELETE FROM um_fts WHERE owner_table=? AND owner_id=?",
+                    (ot, oid))
+            report["purged_fts"] = len(dirty["orphan_fts"])
+            # Полная пересборка FTS из родителей (формат тел — как _fts_index).
+            self.conn.execute("DELETE FROM um_fts")
+            self.conn.execute(
+                "INSERT INTO um_fts(owner_table, owner_id, body)"
+                " SELECT 'um_messages', id, content FROM um_messages")
+            self.conn.execute(
+                "INSERT INTO um_fts(owner_table, owner_id, body)"
+                " SELECT 'um_summaries', id, body FROM um_summaries")
+            self.conn.execute(
+                "INSERT INTO um_fts(owner_table, owner_id, body)"
+                " SELECT 'um_facts', id, name || ' ' || body FROM um_facts")
+            self.conn.execute(
+                """INSERT INTO um_fts(owner_table, owner_id, body)
+                   SELECT 'um_edges', e.id, s.display || ' ' || e.predicate || ' ' || o.display
+                   FROM um_edges e JOIN um_entities s ON s.id=e.subject_id
+                   JOIN um_entities o ON o.id=e.object_id""")
+            report["fts_rebuilt"] = True
+        self._prune_orphan_entities()
+        if dim > 0:
+            try:
+                report["vec_index"] = self.build_vec_index(dim)
+            except Exception as e:
+                report["vec_index_error"] = f"{type(e).__name__}: {e}"[:200]
+        self.conn.commit()
+        return report
 
     @_locked
     def close(self) -> None:

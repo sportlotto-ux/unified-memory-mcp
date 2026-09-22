@@ -192,9 +192,26 @@ def mem_status() -> str:
 
 
 @mcp.tool()
-def mem_doctor() -> str:
-    """DB diagnostics: integrity, vectors by model, FTS flag."""
-    return json.dumps(_store().diagnostics())
+def mem_doctor(mode: str = "check", apply: bool = False) -> str:
+    """DB diagnostics. mode: check (readonly: diagnostics + hygiene candidates) |
+    clean (purge orphans) | repair (purge + FTS rebuild + vec rebuild).
+    clean/repair требуют apply=True (иначе dry-run) и всегда backup-first."""
+    store = _store()
+    if mode == "check":
+        return json.dumps({**store.diagnostics(), "hygiene": store.hygiene()})
+    if mode not in ("clean", "repair"):
+        raise ValueError(f"unknown mode {mode!r}: check | clean | repair")
+    if not apply:
+        return json.dumps({"mode": mode, "apply_required": True,
+                           "would": store.hygiene()})
+    if mode == "clean":
+        dirty = store.hygiene()
+        rep = store.repair(dim=0)
+        rep["vec_skipped"] = True
+        return json.dumps({**rep, "candidates": dirty})
+    ing = _ingest()
+    dim = ing.backend.dim if ing.backend else 0
+    return json.dumps(store.repair(dim=dim))
 
 
 def main():

@@ -150,4 +150,9 @@ class Ingest:
             for (ot, oid, _), vec in zip(chunk, vecs):
                 self.store.add_vector(ot, oid, vec, model, owner)
                 report["embedded"] += 1
+        if self.cfg.vec_index != "off":
+            try:
+                report["vec_index"] = self.store.build_vec_index(self.backend.dim)
+            except Exception as e:  # noqa: BLE001 — нет sqlite-vec: вектора уже доложены
+                report["vec_index_error"] = f"{type(e).__name__}: {e}"[:200]
         return report

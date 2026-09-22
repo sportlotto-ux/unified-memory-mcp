@@ -65,11 +65,26 @@ class Router:
             qv = self.backend.embed_query(query)
             tables = {"all": None, "session": ["um_messages", "um_summaries", "um_edges"],
                       "facts": ["um_facts"]}[scope]
-            # Batch: все вектора одним проходом, тела — bodies_for (макс. 4 запроса).
-            all_vecs = self.store.all_vectors(tables, owner)
-            cand = [(ot, oid, vec) for ot, oid, vec in all_vecs
-                    if len(vec) == len(qv)]
-            self.last_stats["dim_skipped"] = len(all_vecs) - len(cand)
+            # v0.4-п.6: KNN-кандидаты из vec0 + ТОЧНЫЙ косинусный перескоринг
+            # (порядок L2 == порядку косинуса на нормализованных векторах;
+            # шкала оценок не меняется — паритет с brute force).
+            cand = []
+            self.last_stats["vec_index"] = "brute"
+            if self.cfg.vec_index != "off":
+                knn_rows = self.store.knn(qv, tables, owner, limit * 2)
+                if knn_rows:
+                    vecs = self.store.vectors_for(
+                        [(ot, oid) for ot, oid, _ in knn_rows])
+                    cand = [(ot, oid, vecs[(ot, oid)]) for ot, oid, _ in knn_rows
+                            if (ot, oid) in vecs and len(vecs[(ot, oid)]) == len(qv)]
+                    if cand:
+                        self.last_stats["vec_index"] = "knn"
+            if not cand:
+                # Batch: все вектора одним проходом (фолбэк без индекса).
+                all_vecs = self.store.all_vectors(tables, owner)
+                cand = [(ot, oid, vec) for ot, oid, vec in all_vecs
+                        if len(vec) == len(qv)]
+                self.last_stats["dim_skipped"] = len(all_vecs) - len(cand)
             bodies = self.store.bodies_for([(ot, oid) for ot, oid, _ in cand])
             scored = []
             for ot, oid, vec in cand:

@@ -9,7 +9,7 @@
 | Новый модуль | Источники | Комментарий |
 |---|---|---|
 | `embeddings.py` ✅ | `L/embedding_provider.py` (1.7k) + `M/core/embeddings.py` | Этап 0 готов: fastembed + реестр + dim-guard. Cloud-бэкенды (voyage/ollama/OpenAI-compat) — этап 3 |
-| `store.py` 🟡 | `L/store.py`+`db_bootstrap.py`+`vector_store.py` + `M/core/beam.py` (DDL-часть) | DDL-план готов; миграция данных — этап 1 |
+| `store.py` ✅ | `L/store.py`+`db_bootstrap.py`+`vector_store.py` + `M/core/beam.py` (DDL-часть) | v0.4 готов: owner-изоляция, vec0-индекс (KNN+перескоринг), hygiene/repair, mem_recent |
 | `ingest.py` ⬜ | `L/engine.py` (ingest) + `M/core/beam.py` (remember-путь) | Один пайплайн: сообщение → `um_messages` → DAG-нод + memory-записи |
 | `recall.py` ✅ | `L/tools.py` (grep/retrieve-логика) + `M/core/polyphonic_recall.py`+`mmr.py` | v0.4-п.3 готов: RRF + recency-приор (exp, halflife) + scope-bias + MMR по Жаккару |
 
