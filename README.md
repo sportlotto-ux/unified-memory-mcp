@@ -1,60 +1,78 @@
 # hermes-unified-memory
 
-Единый MCP-сервер памяти для Hermes Agent — полное слияние двух стеков:
+Один MCP-сервер вместо двух: **хранение + поиск + сжатие** информации для любого MCP-клиента (Hermes Agent, Claude Code, ...).
 
-- [hermes-lcm](https://github.com/stephenschoettler/hermes-lcm) (~65k строк) — lossless context management: SQLite message store, summary DAG, bounded recall после компакшна.
-- [mnemosyne](https://github.com/AxDSan/mnemosyne) (~43k строк) — long-term memory: canonical facts, working/episodic memory, triples-граф, persona-слои.
+Собрано из уроков двух боевых систем:
+- [hermes-lcm](https://github.com/stephenschoettler/hermes-lcm) — lossless context management (message store, summary DAG, bounded recall)
+- [mnemosyne](https://github.com/AxDSan/mnemosyne) — long-term memory (canonical facts, working/episodic memory, triples-граф)
 
-Оба проекта MIT — слияние чистое юридически, attribution в `NOTICE`.
+Обе MIT — attribution в `NOTICE`. Здесь не форк: ядро написано с нуля по их картам
+(`docs/MODULE_MAP.md`, `docs/TOOL_MAP.md`), без перетаскивания 108k строк.
 
-## Зачем
-
-Сегодня оба сервиса персистят текст разговоров и оба отвечают «а что было раньше»
-(`mnemosyne_recall` vs `lcm_recall`/`lcm_grep`), каждый со своей БД
-(`mnemosyne.db` + `lcm.db`), своим embedding-провайдером и своим тул-неймспейсом.
-Результат: двойное хранение, двойная семантика, двойной recall-путь.
-
-Цель: **один пакет, одна БД, один тул-неймспейс `mem_*`, один embedding-слой.**
-
-## Архитектура
-
-```
-┌─────────────────────────────────────────────────┐
-│              MCP server (stdio)                 │
-│  mem_remember / mem_recall / mem_expand /       │
-│  mem_status / mem_doctor / mem_forget ...       │
-├─────────────────────────────────────────────────┤
-│  router.py — единый recall: FTS + vectors +     │
-│  RRF fusion, scope/recency priors               │
-├──────────────┬──────────────────┬───────────────┤
-│ embeddings.py│ store.py (1 SQLite)│ ingest.py   │
-│ 1 fastembed  │ um_messages      │ 1 пайплайн →  │
-│ провайдер   │ um_summaries(DAG)│ DAG + графы   │
-│ + реестр    │ um_facts/triples │ памяти        │
-│ + dim-guard │ um_vectors       │               │
-└──────────────┴──────────────────┴───────────────┘
-```
-
-Исходные модули маппятся в новое ядро без переписывания логики на этапе 1
-(адаптеры), с постепенным переносом — см. `docs/`.
-
-## Статус
-
-- [x] Этап 0: скелет репо + `embeddings.py` (общий слой, работает)
-- [ ] Этап 1: `store.py` — единая схема, миграция `mnemosyne.db` + `lcm.db`
-- [ ] Этап 2: `ingest.py` — единый пайплайн (сообщения → DAG + память)
-- [ ] Этап 3: `router.py` + MCP-тулы `mem_*`
-- [ ] Этап 4: перенос логики из апстримов, удаление дублей
-
-## Быстрый старт (этап 0)
+## Установка
 
 ```bash
-pip install -e .
-python -m unified_memory.embeddings  # smoke-test провайдера
+git clone https://github.com/<you>/hermes-unified-memory
+cd hermes-unified-memory
+pip install -e .                    # база: FTS-поиск + extractive-сжатие, всё из коробки
+pip install -e .[local-embed]       # + семантика: локальный fastembed, CPU, без облаков
 ```
 
-## Доки
+Требования: Python 3.11+, SQLite из коробки. Опционально для настоящего пересказа:
 
-- `docs/MODULE_MAP.md` — какие модули апстримов куда переезжают
-- `docs/TOOL_MAP.md` — `lcm_*` + `mnemosyne_*` → `mem_*`
-- `docs/MIGRATION_PLAN.md` — этапы, риски, критерии готовности
+```bash
+export UM_SUMMARIZER_URL=http://localhost:11434/v1   # OpenAI-совместимый endpoint (ollama и др.)
+export UM_SUMMARIZER_MODEL=qwen3:8b
+```
+
+## Подключение
+
+```json
+{
+  "mcpServers": {
+    "unified-memory": {
+      "command": "python",
+      "args": ["-m", "unified_memory.server"],
+      "cwd": "/path/to/hermes-unified-memory",
+      "env": { "UM_DATABASE_PATH": "~/.hermes/unified_memory.db" }
+    }
+  }
+}
+```
+
+## Тулы (8)
+
+| Тул | Что делает |
+|---|---|
+| `mem_remember` | Сохранить сообщение сессии (`session_id`, `role`, `content`) |
+| `mem_fact` | Сохранить долгий факт (`category`, `name`, `body`, `importance` 0–1) |
+| `mem_recall` | Единый поиск: FTS + вектора + RRF-fusion. `scope`: `all`/`session`/`facts` |
+| `mem_expand` | Дословно по `kind`+`id` (`message`/`fact`/`summary`) |
+| `mem_compact` | Сжать старые сообщения сессии в summary. **Сырьё остаётся** (lossless) |
+| `mem_forget` | Удалить факт по id |
+| `mem_status` | Счётчики + флаги деградации (`vectors_enabled`, `summarizer`, `fts`) |
+| `mem_doctor` | `integrity_check`, вектора по моделям |
+
+## Как это работает
+
+- **Хранение:** одна SQLite (WAL): `um_messages` + `um_summaries` (DAG) + `um_facts` + `um_vectors` + `um_meta`.
+- **Поиск:** FTS5 (fallback LIKE) + cosine по векторам + RRF. Без fastembed — честный FTS-режим, `mem_status` так и скажет (`vectors_enabled: false`), молчаливого «вроде ищет» нет.
+- **Сжатие:** `mem_compact(session, keep_tail=20)` — старые сообщения в summary-ноду с покрытием `covers_from/to`. Пересказ — LLM-endpoint, если задан; иначе детерминированная extractive-конденсация (без галлюцинаций, но и без пересказа — `mem_status` показывает какой).
+- **Защита от старых болячек:** нет жёсткого `importance: 0.95` (причина canonical-bloat в mnemosyne) — кап `0..1`; смена embedding-модели без reindex — громкая ошибка, а не тихая деградация recall.
+
+## Переменные окружения
+
+| Переменная | Дефолт | Назначение |
+|---|---|---|
+| `UM_DATABASE_PATH` | `~/.hermes/unified_memory.db` | Путь к БД |
+| `UM_EMBEDDING_MODEL` | `paraphrase-multilingual-MiniLM-L12-v2` | Модель fastembed (из реестра!) |
+| `UM_SUMMARIZER_URL` / `UM_SUMMARIZER_MODEL` | — | LLM-пересказ; без них extractive |
+| `UM_SUMMARIZER_API_KEY` | — | Bearer для endpoint |
+
+## Разработка
+
+```bash
+python -m pytest tests/ -q   # 11 passed, 1 skipped без fastembed
+```
+
+Roadmap и разбор апстримов: `docs/MIGRATION_PLAN.md`. Переезд с hermes-lcm/mnemosyne: `docs/IMPORT.md`.
