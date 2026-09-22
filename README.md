@@ -82,7 +82,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 | `mem_assemble` | Bounded активный контекст: summaries + свежий хвост в бюджет токенов |
 | `mem_forget` | Удаление по `kind`: `fact`/`edge`/`link` (id) или `entity` (имя), каскадом |
 | `mem_status` | Счётчики + флаги деградации (`vectors_enabled`, `summarizer`, `fts`) |
-| `mem_doctor` | `integrity_check`, вектора по моделям, hygiene; read-only `export` (JSON-дамп в `<db>.export-<ts>.json`, вектора base64, архив не входит); мутации `clean`/`repair` (backup-first) и `archive`/`purge` (только с `apply=true`) |
+| `mem_doctor` | `integrity_check`, вектора по моделям, hygiene; read-only `export` (JSON-дамп в `<db>.export-<ts>.json`, вектора base64, архив не входит); мутации `clean`/`repair` (backup-first), `archive`/`purge`/`retention` (только с `apply=true`; `retention` — age-based вынос горячего старше `UM_RETENTION_DAYS`) |
 
 ## Как это работает
 
@@ -139,7 +139,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 - Isolation добровольная: `owner=""` (дефолт) — legacy без фильтра, видит всё; строгая изоляция — только при непустом `owner`. Старые БД мигрируют сами (`owner=''`), сущности пересобираются под `UNIQUE(name, owner)`.
 - Redaction forward-only: сторa, созданные до v0.4, могут содержать секреты — чистить руками + reindex.
 - Смена embedding-модели требует reindex (падает громко, `DimensionMismatchError`): ранние сторa на MiniLM-384 с дефолтом mpnet-768 несовместимы — пересоздайте БД или задайте `UM_EMBEDDING_MODEL` явно.
-- Нет cron-режима для age-based retention (а): `mem_doctor(mode=retention)` не существует, а `mode=archive` игнорирует `UM_RETENTION_DAYS` — см. `docs/BACKLOG.md` (P3.5).
+- Cron-режима нет (демона нет), но age-based проход (а) теперь есть вручную/по cron: `mem_doctor(mode=retention, apply=true)` выносит горячее старше `UM_RETENTION_DAYS` (dry-run без `apply` считает `would_move`, идемпотентен). Ленивый недельный проход на ingest остаётся.
 - Новая версия факта (`mem_update` со сменой тела и `mem_batch` `update` с `body`) создаётся **без вектора** до следующего `mem_reindex` — наследованное поведение одиночного `mem_update`, не регрессия батча.
 
 ## Разработка
