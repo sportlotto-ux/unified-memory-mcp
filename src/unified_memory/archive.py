@@ -86,9 +86,14 @@ def _ref_id(ref) -> int | None:
 
 def move_oldest(store, conn: sqlite3.Connection, limit: int = 500,
                 before_ts: float = 0.0, label: str = "") -> int:
-    """Старейшие сообщения -> архив (текст+вектор), в горячей — заглушка (a2)."""
+    """Старейшие сообщения -> архив (текст+вектор), в горячей — заглушка (a2).
+
+    Cold SQLite commit выполняется до первого hot commit. Между двумя
+    независимыми файлами нет 2PC: обратный порядок оставлял бы hot stub без
+    архивной строки при crash. Повторный проход безопасен благодаря
+    INSERT OR REPLACE и уже durable cold rows.
+    """
     rows = store.oldest_messages(limit, before_ts)
-    n = 0
     for m in rows:
         conn.execute(
             "INSERT OR REPLACE INTO ar_messages(id, session_id, owner, role,"
@@ -101,10 +106,11 @@ def move_oldest(store, conn: sqlite3.Connection, limit: int = 500,
                 "INSERT OR REPLACE INTO ar_vectors(owner_table, owner_id,"
                 " embedding, model, owner) VALUES('um_messages',?,?,?,?)",
                 (m["id"], vec[0], vec[1], m["owner"]))
-        store.mark_archived(m["id"], f"{label}#{m['id']}")
-        n += 1
+    # Сначала делаем cold-копию долговечной; только затем меняем hot DB.
     conn.commit()
-    return n
+    for m in rows:
+        store.mark_archived(m["id"], f"{label}#{m['id']}")
+    return len(rows)
 
 
 def purge_older_than(conn: sqlite3.Connection, ts: float) -> int:

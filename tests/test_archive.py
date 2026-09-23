@@ -79,6 +79,30 @@ def test_second_move_skips_archived(cfg, store):
         conn.close()
 
 
+def test_archive_is_durable_before_hot_mark(cfg, store, monkeypatch):
+    """A crash after hot commit must not erase the cold copy."""
+    ids = _fill(store, 2)
+    conn = archive.open_archive(cfg.archive_path)
+    original = store.mark_archived
+
+    def fail_after_hot_commit(mid, ref):
+        original(mid, ref)
+        raise RuntimeError("simulated crash after hot commit")
+
+    monkeypatch.setattr(store, "mark_archived", fail_after_hot_commit)
+    try:
+        with pytest.raises(RuntimeError, match="hot commit"):
+            archive.move_oldest(store, conn, limit=2, label="cold")
+    finally:
+        conn.close()
+    conn = archive.open_archive(cfg.archive_path)
+    try:
+        assert conn.execute("SELECT count(*) FROM ar_messages").fetchone()[0] == 2
+        assert archive.fetch_message(conn, ids[0])["content"].startswith("сообщение 0")
+    finally:
+        conn.close()
+
+
 def test_purge_only_older_than(cfg, store):
     ids = _fill(store, 3)
     conn = archive.open_archive(cfg.archive_path)
