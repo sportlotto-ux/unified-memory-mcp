@@ -337,7 +337,8 @@ class Router:
             w = nb.get("weight", 1.0)
             w = 1.0 if w is None else float(w)  # A1: вес в скоринге; явный 0 валиден (CHECK weight>=0)
             if key not in emitted and key not in seed_keys:
-                if self.store.node_ok(nt, nid, owner, include_expired, as_of):
+                if self.store.node_ok(nt, nid, owner, include_expired, as_of,
+                                       session_id=sess):
                     found = self.store.bodies_for([(nt, nid)]).get((nt, nid))
                     if found and found[0] is not None:
                         emitted[key] = (score * w, found[0], found[1])

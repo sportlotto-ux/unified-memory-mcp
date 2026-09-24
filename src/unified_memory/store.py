@@ -1751,27 +1751,51 @@ class Store:
 
     @_locked
     def node_ok(self, table: str, oid: int, owner: str = "",
-                include_expired: bool = False, as_of: float | None = None) -> bool:
-        """Виден ли узел (table,id) при owner/include_expired/as_of.
+                include_expired: bool = False, as_of: float | None = None,
+                session_id: str = "") -> bool:
+        """Виден ли узел (table,id) при owner/session/liveness-фильтрах.
         Архивные заглушки сообщений скрыты, как в остальных руках recall."""
         if table == "um_messages":
             row = self.conn.execute(
-                "SELECT owner, externalized_ref FROM um_messages WHERE id=?",
-                (oid,)).fetchone()
+                "SELECT owner, externalized_ref, session_id"
+                " FROM um_messages WHERE id=?", (oid,)).fetchone()
             if not row or row[1]:
+                return False
+            if session_id and row[2] != session_id:
                 return False
             return not owner or (row[0] or "") == owner
         if table == "um_summaries":
             row = self.conn.execute(
-                "SELECT owner FROM um_summaries WHERE id=?", (oid,)).fetchone()
-            return bool(row) and (not owner or (row[0] or "") == owner)
-        if table in ("um_facts", "um_edges"):
+                "SELECT owner, session_id FROM um_summaries WHERE id=?",
+                (oid,)).fetchone()
+            return (bool(row)
+                    and (not session_id or row[1] == session_id)
+                    and (not owner or (row[0] or "") == owner))
+        if table == "um_facts":
+            if session_id:
+                return False  # facts не имеют session dimension
             row = self.conn.execute(
-                f"SELECT owner, created_at, valid_until FROM {table} WHERE id=?",
+                "SELECT owner, created_at, valid_until FROM um_facts WHERE id=?",
                 (oid,)).fetchone()
             if not row:
                 return False
             if owner and (row[0] or "") != owner:
+                return False
+            ca, vu = row[1] or 0.0, row[2] or 0.0
+            if as_of is not None:
+                return ca <= as_of and (vu == 0 or vu > as_of)
+            if include_expired:
+                return True
+            return vu == 0 or vu > time.time()
+        if table == "um_edges":
+            row = self.conn.execute(
+                "SELECT owner, created_at, valid_until, session_id"
+                " FROM um_edges WHERE id=?", (oid,)).fetchone()
+            if not row:
+                return False
+            if owner and (row[0] or "") != owner:
+                return False
+            if session_id and row[3] != session_id:
                 return False
             ca, vu = row[1] or 0.0, row[2] or 0.0
             if as_of is not None:

@@ -114,6 +114,25 @@ def test_owner_isolation(rig):
     assert _ids(r.recall("яблоко", scope="facts", hops=2, owner="tenant-b")) == set()
 
 
+def test_session_scope_hides_linked_foreign_nodes(rig):
+    st, r = rig
+    source = st.add_message("s1", "user", "seed")
+    foreign_message = st.add_message("s2", "user", "foreign message")
+    unscoped_fact = _fact(st, "fruit", "яблоко", "linked fact")
+    st.link("um_messages", source, "um_messages", foreign_message,
+            "supports", session_id="s1")
+    st.link("um_messages", source, "um_facts", unscoped_fact,
+            "supports", session_id="s1")
+
+    hits = r._graph_bfs(
+        "seed", "session", "s1", 20, "", False, None, 2, "",
+        [("um_messages", source)])
+    keys = _ids(hits)
+    assert ("um_messages", foreign_message) not in keys
+    assert ("um_facts", unscoped_fact) not in keys
+    assert all(h.session_id == "s1" for h in hits)
+
+
 def test_rel_filter_and_case(rig):
     st, r = rig
     a = _fact(st, "fruit", "яблоко", "красное яблоко")
