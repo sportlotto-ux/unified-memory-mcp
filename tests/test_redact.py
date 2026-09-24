@@ -1,4 +1,8 @@
-"""Пункт 1 v0.4: redaction-гейт. Секреты не должны пережить ingest."""
+"""Пункт 1 v0.4: redaction-гейт. Секреты не должны пережить ingest.
+
+Synthetic fixtures intentionally avoid provider-shaped ``sk-`` prefixes; the
+redaction contract under test is the ``api_key=`` assignment itself.
+"""
 
 import pytest
 
@@ -10,7 +14,7 @@ from unified_memory.store import Store
 from unified_memory.summarize import ExtractiveSummarizer
 
 CASES = [
-    ("api_key", "deploy with api_key=sk-SECRETAPIKEY1234567890 done", "sk-SECRETAPIKEY1234567890"),
+    ("api_key", "deploy with api_key=FAKE_APIKEY_1234567890 done", "FAKE_APIKEY_1234567890"),
     ("bearer_token", "header Bearer SECRETBEARERTOKEN9988776655 here", "SECRETBEARERTOKEN9988776655"),
     ("password_assignment", "login password=MySecretPass123 ok", "MySecretPass123"),
     ("private_key", "key -----BEGIN RSA PRIVATE KEY-----\nSECRETKEYBODY999\n-----END RSA PRIVATE KEY----- end",
@@ -47,33 +51,33 @@ def test_each_pattern_redacted(ing, name, text, secret):
 
 
 def test_fact_path_redacted(ing):
-    ing.remember_fact("cred", "deploy", "api_key=sk-FACTSECRET1234567890")
-    assert _leaked(ing.store, "sk-FACTSECRET1234567890") == []
+    ing.remember_fact("cred", "deploy", "api_key=FAKE_FACTSECRET_1234567890")
+    assert _leaked(ing.store, "FAKE_FACTSECRET_1234567890") == []
     rows = ing.store.select("SELECT body FROM um_facts")
     assert PLACEHOLDER_PREFIX in rows[0][0]
 
 
 def test_update_fact_path_redacted(ing):
     fid = ing.remember_fact("cred", "deploy", "old body")
-    ing.update_fact(fid, body="new api_key=sk-UPDATESECRET1234567890")
-    assert _leaked(ing.store, "sk-UPDATESECRET1234567890") == []
+    ing.update_fact(fid, body="new api_key=FAKE_UPDATESECRET_1234567890")
+    assert _leaked(ing.store, "FAKE_UPDATESECRET_1234567890") == []
     body = ing.store.select(
         "SELECT body FROM um_facts WHERE valid_until=0")[0][0]
     assert PLACEHOLDER_PREFIX in body
 
 
 def test_prefix_preserved_not_just_deleted(ing):
-    ing.remember_message("s", "user", "use api_key=sk-KEEPME1234567890ABCDEF now")
+    ing.remember_message("s", "user", "use api_key=FAKE_KEEPME_1234567890ABCDEF now")
     body = ing.store.select("SELECT content FROM um_messages")[0][0]
     assert body.startswith("use api_key=")  # видно ЧТО было
     assert "KEEPME" not in body
 
 
 def test_compact_summary_inherits_redaction(ing):
-    ing.remember_message("s", "user", "first note api_key=sk-SUMMARYSECRET1234567890 here")
+    ing.remember_message("s", "user", "first note api_key=FAKE_SUMMARYSECRET_1234567890 here")
     ing.remember_message("s", "user", "second note plain")
     ing.compact_session("s", keep_tail=0)
-    assert _leaked(ing.store, "sk-SUMMARYSECRET1234567890") == []
+    assert _leaked(ing.store, "FAKE_SUMMARYSECRET_1234567890") == []
     bodies = [r[0] for r in ing.store.select("SELECT body FROM um_summaries")]
     assert bodies and all("SUMMARYSECRET" not in b for b in bodies)
 
@@ -83,15 +87,15 @@ def test_disabled_passes_through(tmp_path):
     store = Store(cfg)
     try:
         ing = Ingest(store, FakeBackend(), ExtractiveSummarizer(), cfg)
-        ing.remember_message("s", "user", "api_key=sk-PASSTHROUGH1234567890")
+        ing.remember_message("s", "user", "api_key=FAKE_PASSTHROUGH_1234567890")
         body = store.select("SELECT content FROM um_messages")[0][0]
-        assert "sk-PASSTHROUGH1234567890" in body
+        assert "FAKE_PASSTHROUGH_1234567890" in body
     finally:
         store.close()
 
 
 def test_idempotent():
-    once = redact_text("api_key=sk-IDEMPOTENT1234567890!")
+    once = redact_text("api_key=FAKE_IDEMPOTENT_1234567890!")
     assert redact_text(once) == once
 
 

@@ -41,12 +41,12 @@ def test_update_fact_redacts_body(srv):
     import json
     fid = json.loads(srv.mem_fact("preference", "чай", "зелёный"))["id"]
     out = json.loads(srv.mem_update(
-        kind="fact", id=fid, body="api_key=sk-SERVERUPDATESECRET1234567890"))
+        kind="fact", id=fid, body="api_key=FAKE_SERVERUPDATESECRET_1234567890"))
     assert out["status"] == "superseded"
     store = srv._STATE["store"]
     assert store.select(
         "SELECT count(*) FROM um_facts WHERE body LIKE ?",
-        ("%sk-SERVERUPDATESECRET1234567890%",),
+        ("%FAKE_SERVERUPDATESECRET_1234567890%",),
     ) == [(0,)]
 
 
