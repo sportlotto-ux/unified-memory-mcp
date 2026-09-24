@@ -2,7 +2,7 @@
 
 Tools: mem_remember mem_fact mem_annotate mem_link mem_graph_query mem_recall
        mem_expand mem_get mem_inspect mem_compact mem_forget mem_status mem_doctor
-       mem_validate mem_task
+       mem_validate mem_task mem_persona
 
 Run: python -m unified_memory.server  (stdio transport)
 """
@@ -569,6 +569,29 @@ def mem_validate(target: str, claim: str = "", owner: str = "") -> str:
                        partial=cfg.evidence_partial,
                        archived_fetch=_archive_fetch(cfg))
     return json.dumps(out, ensure_ascii=False)
+
+
+@mcp.tool(annotations=_ann())
+def mem_persona(op: str = "get", trait: str = "", body: str = "",
+                limit: int = 100, owner: str = "") -> str:
+    """Agent profile over slot-facts (P2.5). op=set (trait+body upsert →
+    created|superseded|noop) | op=get (whole live profile {trait: body},
+    ordered by trait, capped by limit). Traits are category='persona' facts:
+    mem_get/mem_forget(kind=fact) apply."""
+    ing = _ingest()
+    if op == "set":
+        out = ing.persona_set(trait, body, owner)
+        return json.dumps({"id": out["id"], "trait": (trait or "").strip(),
+                           "status": out["status"],
+                           "superseded_id": out.get("superseded_id", 0)},
+                          ensure_ascii=False)
+    if op == "get":
+        if limit < 1 or limit > 500:
+            raise ValueError("limit must be between 1 and 500")
+        traits = ing.persona_profile(owner, limit)
+        return json.dumps({"traits": traits, "count": len(traits)},
+                          ensure_ascii=False)
+    raise ValueError(f"unknown op {op!r}: set | get")
 
 
 @mcp.tool(annotations=_ann())

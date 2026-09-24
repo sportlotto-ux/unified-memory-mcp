@@ -603,6 +603,59 @@ in-place metadata update трогает только одну live-строку 
 **Validation:** полный suite на Python 3.14 и 3.12, `git diff --check`, wheel
 build/install/import smoke из clean venv.
 
+## 5.5 P2.5 — Persona (reuse um_facts)
+
+**Use case:** агент хранит свой профиль (роль, тон, язык, ограничения) как
+набор живых трейтов и забирает весь профиль одним вызовом для системного
+промпта — без ручной сборки по именам.
+
+**Проблема:** профиль размазан по безымянным фактам: нет ни конвенции
+именования, ни способа забрать профиль целиком bounded-вызовом.
+
+**Пользовательский эффект:** `mem_persona(op=set|get)`: `set(trait, body)` —
+upsert слота `(owner,"persona",trait)` со статусом
+`created|superseded|noop`; `get` — весь живой профиль словарём
+`{trait: body}` bounded-лимитом. Трейты видны в `mem_get` как факты,
+переживают export/import.
+
+**Scope:**
+
+- без новых таблиц: трейт — обычный `um_facts` slot `category="persona"`;
+- один новый тул `mem_persona` (set — non-idempotent write, get — ro);
+- `set` — через существующий `upsert_fact` (redaction, вектора, FTS,
+  history — бесплатно); ESR-слоёв не добавляем;
+- `get` — read-only `Store.persona_profile` (`valid_until=0`, `ORDER BY name`,
+  cap `limit` 1..500);
+- удаление трейта — существующим `mem_forget(kind=fact)`, без кода;
+- owner-изоляция слотов как у фактов (legacy `""` видит всё).
+
+**Non-goals:**
+
+- session partition (owner-scope, как P2.1/P2.4);
+- смена migration policy (`memoria_persona` остаётся `not_in_scope`);
+- статусы/машины (трейт — plain value, не задача);
+- TTL для трейтов, batch-ops, влияние на recall/assemble ranking.
+
+**Красные тесты** (`tests/test_persona.py`, 6 шт.): set+get roundtrip,
+перезапись трейта (`superseded`), rejects (пустое/unknown op),
+owner isolation + legacy, redaction, export/import профиля + bound лимита.
+
+**Acceptance criteria:**
+
+- пустой trait/body — `ValueError` без записи;
+- повтор того же тела — `noop` с тем же id;
+- `get` возвращает только живые трейты владельца, сортировка по имени;
+- default recall ranking, legacy owner semantics, archive behavior не меняются.
+
+**Rollback/failure behavior:** отказ до записи; `set` — в
+`Store.transaction()` через существующий upsert; `get` — чистый SELECT.
+
+**Docs/config impact:** `README.md` (23 тула), `CHANGELOG.md`, status log;
+новых `UM_*`, миграций, изменений `IMPORT.md` нет.
+
+**Validation:** полный suite на Python 3.14 и 3.12, `git diff --check`, wheel
+build/install/import smoke из clean venv.
+
 ## 6. Story template
 
 Каждая story должна иметь этот блок до начала кода:
@@ -650,6 +703,7 @@ Validation:
 | P2.2 annotations | done (uncommitted) | — | um_annotations metadata-only layer, mem_annotate/mem_get/mem_forget, cascade + export/import remap, recall invariant; full suite 382/4 (3.14), wheel smoke OK |
 | P2.3 validate | done (uncommitted) | — | run_validate + mem_validate read-only collation (cite/conflicts/live links/annotations), verdict-free, no new tables/config; full suite 388/4 (3.14), wheel smoke OK |
 | P2.4 tasks | done (uncommitted) | — | mem_task over category="task" slots, status machine in metadata_json, supersede carry-over, no new tables, recall invariant; full suite 394/4 (3.14), wheel smoke OK |
+| P2.5 persona | done (uncommitted) | — | mem_persona set/get over category="persona" slots, bounded ordered profile, no new tables, upstream persona stays not_in_scope; full suite 400/4 (3.14), wheel smoke OK |
 
 ## 9. Final gate
 

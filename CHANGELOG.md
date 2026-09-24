@@ -22,6 +22,9 @@
 - P2.4: `mem_task` progress over `category="task"` slot-facts (open/doing/
   blocked/done machine, metadata-only status, `metadata_json` carried over
   supersede); no new tables, recall ranking unchanged.
+- P2.5: `mem_persona` profile over `category="persona"` slots (set upsert +
+  bounded ordered get); no new tables, upstream `memoria_persona` stays
+  `not_in_scope`.
 - Migration metadata columns for source references, confidence, veracity, and
   tool metadata; export/import and `mem_get` preserve them.
 

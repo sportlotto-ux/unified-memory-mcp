@@ -12,7 +12,7 @@ from .config import Config
 from .embeddings import EmbeddingBackend
 from .engine import ActiveWindow
 from .recall import Router
-from .store import Store
+from .store import PERSONA_CATEGORY, Store
 from .summarize import Summarizer
 
 
@@ -238,6 +238,22 @@ class Ingest:
                   limit: int = 50) -> list[dict]:
         """P2.4: живые задачи владельца (read-only, без транзакции)."""
         return self.store.task_list(owner, status, limit)
+
+    def persona_set(self, trait: str, body: str, owner: str = "",
+                    _commit: bool = True) -> dict:
+        """P2.5: upsert трейта профиля. Возвращает {id, status, superseded_id}."""
+        trait = self._clean(trait or "")
+        body = self._clean(body or "")
+        if not trait.strip():
+            raise ValueError("persona trait is required")
+        if not body.strip():
+            raise ValueError("persona body is required")
+        return self.upsert_fact(PERSONA_CATEGORY, trait, body, 0.5, "", "",
+                                "", "", owner, _commit=_commit)
+
+    def persona_profile(self, owner: str = "", limit: int = 100) -> dict:
+        """P2.5: живой профиль {trait: body} (read-only, без транзакции)."""
+        return self.store.persona_profile(owner, limit)
 
     def batch(self, ops: list[dict], dry_run: bool = False,
               owner: str = "") -> dict:

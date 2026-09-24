@@ -324,6 +324,10 @@ TASK_TRANSITIONS = {
     "done": ("open",),
 }
 
+# P2.5: профиль поверх um_facts category="persona". Трейт — plain value,
+# один живой на (owner, trait); удаление — обычным mem_forget(kind=fact).
+PERSONA_CATEGORY = "persona"
+
 
 def _task_status_of(metadata_json: str) -> str:
     """Статус задачи из metadata_json; отсутствие = open (backward compat)."""
@@ -2335,6 +2339,19 @@ class Store:
             out.append({"id": fid, "name": name, "body": body, "status": st,
                         "created_at": created, "updated_at": updated})
         return out
+
+    @_locked
+    def persona_profile(self, owner: str = "",
+                        limit: int = 100) -> dict[str, str]:
+        """P2.5: живой профиль {trait: body}. owner задан — только его;
+        '' — legacy без фильтра. Сортировка по имени, cap лимитом."""
+        rows = self.conn.execute(
+            "SELECT name, body FROM um_facts WHERE category=?"
+            " AND valid_until=0" + (" AND owner=?" if owner else "") +
+            " ORDER BY name LIMIT ?",
+            (PERSONA_CATEGORY, owner, max(1, int(limit)))
+            if owner else (PERSONA_CATEGORY, max(1, int(limit))))
+        return {name: body for name, body in rows}
 
     @_locked
     def node_ok(self, table: str, oid: int, owner: str = "",
