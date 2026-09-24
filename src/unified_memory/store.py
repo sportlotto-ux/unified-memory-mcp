@@ -52,7 +52,11 @@ CREATE TABLE IF NOT EXISTS um_messages (
     content TEXT NOT NULL,
     created_at REAL NOT NULL,
     source TEXT NOT NULL DEFAULT 'unknown',
-    externalized_ref TEXT
+    externalized_ref TEXT,
+    conversation_id TEXT NOT NULL DEFAULT '',
+    source_order INTEGER NOT NULL DEFAULT 0,
+    source_ref TEXT NOT NULL DEFAULT '',
+    metadata_json TEXT NOT NULL DEFAULT ''
 );
 -- Индексы создаются кодом (_INDEXES) ПОСЛЕ миграций: на legacy-БД
 -- колонки owner ещё нет, и CREATE INDEX падал бы с no such column.
@@ -66,7 +70,8 @@ CREATE TABLE IF NOT EXISTS um_summaries (
     covers_from INTEGER,
     covers_to INTEGER,
     superseded_by INTEGER NOT NULL DEFAULT 0,  -- #2: схлопнуто в ноду ( lineage живёт)
-    created_at REAL NOT NULL
+    created_at REAL NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT ''
 );
 
 
@@ -88,6 +93,9 @@ CREATE TABLE IF NOT EXISTS um_facts (
     importance REAL NOT NULL DEFAULT 0.5,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '',
+    confidence REAL NOT NULL DEFAULT 1.0,
+    veracity TEXT NOT NULL DEFAULT '',
     -- Слот-семантика (v0.5): 0 = живое (sentinel!), иначе timestamp истечения.
     -- NOT NULL обязателен: NULL-строки выпали бы из WHERE valid_until=0
     -- и обошли бы partial unique index ниже.
@@ -125,7 +133,10 @@ CREATE TABLE IF NOT EXISTS um_edges (
     owner TEXT NOT NULL DEFAULT '',
     fact_id INTEGER NOT NULL DEFAULT 0,  -- provenance: какой mem_fact породил
     created_at REAL NOT NULL,
-    valid_until REAL NOT NULL DEFAULT 0  -- 0 = живое; замена ребра = новое ребро
+    valid_until REAL NOT NULL DEFAULT 0,  -- 0 = живое; замена ребра = новое ребро
+    metadata_json TEXT NOT NULL DEFAULT '',
+    confidence REAL NOT NULL DEFAULT 1.0,
+    veracity TEXT NOT NULL DEFAULT ''
 );
 
 -- ADR-001: типизированные связи памяти (message<->fact, fact<->fact).
@@ -304,6 +315,8 @@ class Store:
         self.conn.executescript(SCHEMA)
         # Миграция существующих БД: ранние additive-колонки и display backfill.
         self._migrate_early_columns()
+        # P1.6: migration adapters need source ordering and lossless metadata.
+        self._migrate_source_metadata()
         # v0.4-п.2: owner-колонки. '' = legacy без изоляции, поведение не меняется.
         self._migrate_owner_columns()
         self._migrate_entity_owner()
@@ -436,6 +449,44 @@ class Store:
             self.conn.execute("DROP TABLE um_entities")
             self.conn.execute(
                 "ALTER TABLE um_entities_new RENAME TO um_entities")
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def _migrate_source_metadata(self) -> None:
+        """Add lossless source/provenance fields for migration adapters."""
+        specs = {
+            "um_messages": (
+                ("conversation_id", "TEXT NOT NULL DEFAULT ''"),
+                ("source_order", "INTEGER NOT NULL DEFAULT 0"),
+                ("source_ref", "TEXT NOT NULL DEFAULT ''"),
+                ("metadata_json", "TEXT NOT NULL DEFAULT ''"),
+            ),
+            "um_summaries": (("metadata_json", "TEXT NOT NULL DEFAULT ''"),),
+            "um_facts": (
+                ("metadata_json", "TEXT NOT NULL DEFAULT ''"),
+                ("confidence", "REAL NOT NULL DEFAULT 1.0"),
+                ("veracity", "TEXT NOT NULL DEFAULT ''"),
+            ),
+            "um_edges": (
+                ("metadata_json", "TEXT NOT NULL DEFAULT ''"),
+                ("confidence", "REAL NOT NULL DEFAULT 1.0"),
+                ("veracity", "TEXT NOT NULL DEFAULT ''"),
+            ),
+        }
+        pending: list[tuple[str, str, str]] = []
+        for table, columns in specs.items():
+            present = {row[1] for row in self.conn.execute(
+                f"PRAGMA table_info({table})")}
+            pending.extend((table, name, ddl) for name, ddl in columns
+                          if name not in present)
+        if not pending:
+            return
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            for table, name, ddl in pending:
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
             self.conn.commit()
         except Exception:
             self.conn.rollback()
@@ -699,11 +750,15 @@ class Store:
     @_locked
     def add_message(self, session_id: str, role: str, content: str,
                     source: str = "unknown", owner: str = "",
-                    _commit: bool = True) -> int:
+                    _commit: bool = True, conversation_id: str = "",
+                    source_order: int = 0, source_ref: str = "",
+                    metadata_json: str = "") -> int:
         cur = self.conn.execute(
-            "INSERT INTO um_messages(session_id, owner, role, content, created_at, source)"
-            " VALUES(?,?,?,?,?,?)",
-            (session_id, owner, role, content, time.time(), source),
+            "INSERT INTO um_messages(session_id, owner, role, content, created_at, source,"
+            " externalized_ref, conversation_id, source_order, source_ref, metadata_json)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (session_id, owner, role, content, time.time(), source, None,
+             conversation_id, int(source_order), source_ref, metadata_json),
         )
         mid = cur.lastrowid
         self._fts_index("um_messages", mid, content)
@@ -1431,32 +1486,37 @@ class Store:
         if owner_table == "um_messages":
             row = self.conn.execute(
                 "SELECT session_id, owner, role, created_at, source,"
-                " externalized_ref FROM um_messages WHERE id=?", (owner_id,)
+                " externalized_ref, conversation_id, source_order, source_ref,"
+                " metadata_json FROM um_messages WHERE id=?", (owner_id,)
             ).fetchone()
             metadata = dict(zip(
                 ["session_id", "owner", "role", "created_at", "source",
-                 "externalized_ref"], row or ()))
+                 "externalized_ref", "conversation_id", "source_order", "source_ref",
+                 "metadata_json"], row or ()))
         elif owner_table == "um_summaries":
             row = self.conn.execute(
                 "SELECT session_id, owner, depth, covers_from, covers_to,"
-                " superseded_by, created_at FROM um_summaries WHERE id=?",
+                " superseded_by, created_at, metadata_json FROM um_summaries WHERE id=?",
                 (owner_id,)
             ).fetchone()
             metadata = dict(zip(
                 ["session_id", "owner", "depth", "covers_from", "covers_to",
-                 "superseded_by", "created_at"], row or ()))
+                 "superseded_by", "created_at", "metadata_json"], row or ()))
         elif owner_table == "um_facts":
             row = self.conn.execute(
                 "SELECT owner, category, name, importance, created_at, updated_at,"
-                " valid_until, superseded_by FROM um_facts WHERE id=?", (owner_id,)
+                " valid_until, superseded_by, metadata_json, confidence, veracity"
+                " FROM um_facts WHERE id=?", (owner_id,)
             ).fetchone()
             metadata = dict(zip(
                 ["owner", "category", "name", "importance", "created_at",
-                 "updated_at", "valid_until", "superseded_by"], row or ()))
+                 "updated_at", "valid_until", "superseded_by", "metadata_json",
+                 "confidence", "veracity"], row or ()))
         else:
             row = self.conn.execute(
                 """SELECT e.subject_id, e.predicate, e.object_id, e.session_id,
                           e.owner, e.fact_id, e.created_at, e.valid_until,
+                          e.metadata_json, e.confidence, e.veracity,
                           s.display, o.display
                    FROM um_edges e
                    JOIN um_entities s ON s.id=e.subject_id
@@ -1465,7 +1525,8 @@ class Store:
             ).fetchone()
             metadata = dict(zip(
                 ["subject_id", "predicate", "object_id", "session_id", "owner",
-                 "fact_id", "created_at", "valid_until", "subject", "object"],
+                 "fact_id", "created_at", "valid_until", "metadata_json",
+                 "confidence", "veracity", "subject", "object"],
                 row or ()))
         vector = {"present": False}
         vrow = self.conn.execute(

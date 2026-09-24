@@ -1,34 +1,64 @@
 # IMPORT — переезд с hermes-lcm / mnemosyne
 
-Unified store сознательно **не читает** `mnemosyne.db` / `lcm.db` напрямую:
-схемы чужие и версионируются апстримами. Вместо этого — экспорт через их же тулы:
+## Общий контракт P1.6
+
+Upstream SQLite snapshots открываются через read-only URI. Unified не создаёт и не
+изменяет source DB. По умолчанию migration работает в dry-run и печатает только
+counts, skipped field names и reconciliation metadata — без source content, tool
+payloads и секретов. Apply запускается явно и выполняется в одной транзакции:
+любая ошибка откатывает весь import.
+
+LCM adapter уже поддержан в `src/unified_memory/migration.py`:
+
+```bash
+# plan/report; target DB берётся из UM_DATABASE_PATH
+python -m unified_memory.migration \
+  --format lcm --input /path/to/lcm.db
+
+# explicit atomic apply
+python -m unified_memory.migration \
+  --format lcm --input /path/to/lcm.db --apply
+```
+
+Опции summary strategy:
+
+```bash
+# default: raw messages only; Unified пересчитает summaries по pressure
+python -m unified_memory.migration --format lcm --input lcm.db
+
+# explicit preservation of LCM summary_nodes
+python -m unified_memory.migration \
+  --format lcm --input lcm.db --summary-strategy preserve --apply
+```
+
+`messages` переносятся в порядке `store_id`. В unified message сохраняются
+`conversation_id`, `source_order`, `source_ref` и redaction-gated metadata для
+`tool_call_id`, `tool_name`, `tool_calls` и related LCM fields. Source payload не
+попадает в migration report. Пустые content rows и отключённые source tables
+явно отмечаются в `skipped_fields`; это не молчаливый partial import.
+
+`summary_nodes` по умолчанию не копируются: сохраняется raw transcript, а Unified
+summary pipeline может пересчитать summaries. `preserve` — только явное решение
+оператора; при нём source IDs переводятся в `um_summary_sources`.
 
 ## Из mnemosyne
 
-```python
-# факты: mnemosyne_recall_canonical без фильтров (вывод большой — парсить из файла!)
-# затем по каждой записи:
-mem_fact(category=r["category"], name=r["name"], body=r["body"][:4000])
-```
+Mnemosyne adapter — следующий atomic story P1.6b. До его появления migration
+команда намеренно принимает только `--format lcm`; прямой импорт
+`mnemosyne.db` не выполняется.
 
-Что НЕ везти:
-- `category='skill'` с телами SKILL.md — это bloat, а не память (см. причину
-  canonical-bloat). Скиллы уже живут на диске + в skill-recall индексе.
-- вектора (`memory_embeddings`) — модели/размерности не совпадут, будет
-  `DimensionMismatchError`. Переэмбед происходит автоматически при `mem_fact`.
+Политика будущего adapter:
 
-## Из hermes-lcm
-
-```python
-# постранично: lcm_load_session(session_id) -> mem_remember(...)
-# саммари: lcm_describe(DAG) -> mem_compact() пересчитает свои
-```
-
-DAG-узлы 1:1 не переносятся (у LCM своя нумерация `covers_*`) — переносится
-сырьё (`messages`), summaries пересчитываются `mem_compact`. Это дешевле и чище,
-чем маппинг id.
+- canonical facts + version history;
+- triples/edges с owner/bank mapping;
+- confidence/veracity/metadata, когда присутствуют;
+- working/episodic rows — только через явную policy;
+- annotations/persona/scratchpad/vector blobs — отдельный skip report;
+- тот же read-only dry-run, atomic apply, row-count reconciliation и recall checks.
 
 ## Проверка паритета
 
-После импорта: 10–15 запросов-фрагментов самих воспоминаний → `mem_recall` должен
-вернуть их в топ-3. Решение по дискордантным парам, не по «процентам сошлись».
+После apply отчёт содержит `reconciliation.counts_match` и representative
+recall checks. Дополнительно рекомендуется 10–15 фрагментов исходных воспоминаний:
+`mem_recall` должен вернуть их в топ-3. Решение по дискордантным парам, не по
+проценту «совпавших» строк.
