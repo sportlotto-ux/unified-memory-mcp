@@ -2,6 +2,7 @@
 
 Tools: mem_remember mem_fact mem_annotate mem_link mem_graph_query mem_recall
        mem_expand mem_get mem_inspect mem_compact mem_forget mem_status mem_doctor
+       mem_validate
 
 Run: python -m unified_memory.server  (stdio transport)
 """
@@ -31,7 +32,7 @@ from unified_memory.summarize import default_summarizer  # noqa: E402
 from unified_memory import archive  # noqa: E402
 from unified_memory.recent import parse_as_of, parse_period, parse_when  # noqa: E402
 from unified_memory.evidence import (  # noqa: E402
-    parse_ref, run_cite, run_compute, run_conflicts)
+    parse_ref, run_cite, run_compute, run_conflicts, run_validate)
 
 mcp = _Server("unified-memory")
 
@@ -551,6 +552,22 @@ def mem_evidence(claim: str = "", refs: list[str] | None = None,
                             archived_fetch=_archive_fetch(cfg))
     else:
         raise ValueError(f"unknown mode {mode!r}: cite | compute | conflicts")
+    return json.dumps(out, ensure_ascii=False)
+
+
+@mcp.tool(annotations=_ann(ro=True, idem=True))
+def mem_validate(target: str, claim: str = "", owner: str = "") -> str:
+    """Collate validation signals for one ref (P2.3): cite (if claim) +
+    conflicts (target + direct supports/contradicts neighbours) + live
+    supports/contradicts links + annotations. Verdict-free: needs_judgment
+    is always true, the host agent judges. target like 'fact:3'."""
+    _ingest()
+    cfg = _STATE["cfg"]
+    out = run_validate(_STATE["store"], target, claim, owner=owner,
+                       max_refs=cfg.evidence_max_refs,
+                       max_chars=cfg.evidence_max_chars,
+                       partial=cfg.evidence_partial,
+                       archived_fetch=_archive_fetch(cfg))
     return json.dumps(out, ensure_ascii=False)
 
 

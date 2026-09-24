@@ -294,3 +294,61 @@ def run_compute(store, refs: list[str], op: str = "count", pattern: str = "",
     return {"mode": "compute", "op": op, "result": round(result, 6),
             "n": len(values), "refs": refs_out, "rejections": rejections,
             "verdict": "supported"}
+
+
+_SHORT = {"um_facts": "fact", "um_messages": "message",
+          "um_summaries": "summary", "um_edges": "edge"}
+
+_VALIDATE_RELS = ("supports", "contradicts")
+
+
+def _empty_conflicts() -> dict:
+    return {"mode": "conflicts", "candidates": [], "count": 0,
+            "needs_judgment": True, "rejections": []}
+
+
+def run_validate(store, target: str, claim: str = "", owner: str = "",
+                 max_refs: int = 50, max_chars: int = 8000,
+                 partial: float = 0.5, max_neighbours: int = 20,
+                 archived_fetch: Callable[[str, int], str | None] | None = None) -> dict:
+    """P2.3: collation сигналов проверки для одного ref — только чтение.
+
+    Цель + cite (если claim) + conflicts (цель + прямые соседи по живым
+    supports/contradicts) + links + annotations. Вердикта нет:
+    needs_judgment=true всегда, судьёй остаётся хост-агент.
+    """
+    table, tid = parse_ref(target)  # ValueError на мусор — до чтения
+    short = _SHORT[table]
+    target_str = f"{short}:{tid}"
+    details = store.ref_details(table, tid, owner)
+    if details is None:
+        return {"target": target_str, "kind": short, "id": tid,
+                "found": False, "cite": None,
+                "conflicts": _empty_conflicts(),
+                "links": [], "annotations": [], "needs_judgment": True}
+    links_out: list[dict] = []
+    neighbours: list[str] = []
+    for link in details.get("links", []):
+        if link.get("valid_until", 0) != 0:
+            continue
+        if link.get("rel") not in _VALIDATE_RELS:
+            continue
+        src = f"{_SHORT[link['src_table']]}:{link['src_id']}"
+        dst = f"{_SHORT[link['dst_table']]}:{link['dst_id']}"
+        links_out.append({"src": src, "dst": dst, "rel": link["rel"],
+                          "weight": link.get("weight", 1.0)})
+        other = dst if src == target_str else src
+        if other != target_str and other not in neighbours:
+            neighbours.append(other)
+    cite = (run_cite(store, claim, [target_str], owner=owner,
+                     max_refs=max_refs, max_chars=max_chars, partial=partial,
+                     archived_fetch=archived_fetch)
+            if (claim or "").strip() else None)
+    conflicts = run_conflicts(
+        store, [target_str] + neighbours[:max_neighbours], owner=owner,
+        max_refs=max_refs, max_chars=max_chars, archived_fetch=archived_fetch)
+    return {"target": target_str, "kind": short, "id": tid,
+            "found": True, "cite": cite, "conflicts": conflicts,
+            "links": links_out,
+            "annotations": details.get("annotations", []),
+            "needs_judgment": True}

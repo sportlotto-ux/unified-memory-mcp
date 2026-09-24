@@ -483,6 +483,66 @@ isolation + legacy, redaction, recall/assemble invariance.
 **Validation:** полный suite на Python 3.14 и 3.12, `git diff --check`, wheel
 build/install/import smoke из clean venv.
 
+## 5.3 P2.3 — Validate/attest (read-only collation)
+
+**Use case:** агент перед использованием спорного ref одним вызовом видит все
+сигналы проверки: дословная опора (`cite`), известные противоречия
+(`conflicts`), чужие `supports/contradicts`-связи и пометки
+`disputed/correction` — и сам выносит вердикт.
+
+**Проблема:** сигналы проверки разбросаны по трём рукам (`mem_evidence`,
+`mem_get.links`, `mem_get.annotations`); агент собирает их тремя вызовами
+и сам вычисляет соседей цели.
+
+**Пользовательский эффект:** `mem_validate(target, claim="", owner="")`
+возвращает `{target, found, cite|null, conflicts, links, annotations,
+needs_judgment: true}`; вердикта тул не выносит — судьёй остаётся хост-агент,
+как в `mem_evidence(conflicts)`.
+
+**Scope:**
+
+- pure `run_validate` в `evidence.py` + тонкий `mem_validate` в `server.py`
+  (ro, idempotent), без новых таблиц и без новых `UM_*`;
+- `cite` — только если передан `claim` (тот же `run_cite`), иначе `null`;
+- `conflicts` — цель + прямые соседи по живым `supports/contradicts`
+  (cap 20 соседей), тот же `run_conflicts`;
+- `links` — только живые (`valid_until=0`) `supports/contradicts`, концы как
+  `fact:3`; owner-фильтр как в `mem_get` (без изменений legacy behavior);
+- `annotations` — как в `mem_get` (все 4 kind, owner-фильтр `ref_details`);
+- `needs_judgment: true` всегда; top-level `verdict` запрещён;
+- owner-изоляция и archive-fetch наследуются от вызываемых слоёв
+  (`ref_details` → `found: false`, `_resolve` → `rejections`).
+
+**Non-goals:**
+
+- запись вердиктов, веса доверия, кворумы (молчаливый выбор модели — stop);
+- авто-поиск refs (только цель + её прямые соседи);
+- влияние на `mem_recall`/`mem_assemble` ranking;
+- batch-ops для validate, фоновый worker/scheduler.
+
+**Красные тесты** (`tests/test_validate.py`, 6 шт.): пустые сигналы,
+`cite supported` при дословном claim, видимость `contradicts` + `disputed`,
+`negation`-кандидат через соседа, owner isolation + legacy + bad ref,
+read-only invariance (recall/assemble + повторный вызов бит-в-бит).
+
+**Acceptance criteria:**
+
+- мусорный ref — `ValueError` до чтения;
+- чужая/несуществующая цель — `found: false`, пустые секции,
+  `needs_judgment: true`;
+- протухшие (`valid_until!=0`) связи в `links` не попадают;
+- recall/assemble бит-в-бит до и после validate;
+- legacy `owner=""` видит всё; archive behavior не меняется.
+
+**Rollback/failure behavior:** pure read-only collation поверх существующих
+read-paths; отказ `parse_ref` — до чтения; новый код не пишет ни одной строки.
+
+**Docs/config impact:** `README.md` (21 тул), `CHANGELOG.md`, status log;
+новых `UM_*`, миграций, изменений `IMPORT.md` нет.
+
+**Validation:** полный suite на Python 3.14 и 3.12, `git diff --check`, wheel
+build/install/import smoke из clean venv.
+
 ## 6. Story template
 
 Каждая story должна иметь этот блок до начала кода:
@@ -528,6 +588,7 @@ Validation:
 | P1.6 migration | done | `5dbf1c6` | LCM + Mnemosyne read-only SQLite adapters: dry-run default, atomic apply, reconciliation + recall checks, LCM source ordering/tool metadata, Mnemosyne fact history/graph/owner mapping, explicit working/episodic policies, skipped-field report; full suite 369/4 (3.14), 353/7 (3.12), wheel smoke OK |
 | P2.1 working TTL | done | `bc2aec3` | working slot-fact TTL, lazy expiry through existing vector/FTS lifecycle, opt-in bounded assembly, owner semantics preserved; full suite 375/4 (3.14), 359/7 (3.12), wheel smoke OK |
 | P2.2 annotations | done (uncommitted) | — | um_annotations metadata-only layer, mem_annotate/mem_get/mem_forget, cascade + export/import remap, recall invariant; full suite 382/4 (3.14), wheel smoke OK |
+| P2.3 validate | done (uncommitted) | — | run_validate + mem_validate read-only collation (cite/conflicts/live links/annotations), verdict-free, no new tables/config; full suite 388/4 (3.14), wheel smoke OK |
 
 ## 9. Final gate
 

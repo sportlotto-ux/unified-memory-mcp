@@ -16,6 +16,9 @@
 - P2.2: `um_annotations` metadata-only layer with `mem_annotate`, `mem_get`
   exposure, `mem_forget(kind=annotation)`, target cascade, and export/import
   remap; recall/assembly ranking unchanged.
+- P2.3: `mem_validate` read-only collation (cite if claim + conflicts over
+  target and direct supports/contradicts neighbours + live links +
+  annotations); verdict-free, `needs_judgment` always true.
 - Migration metadata columns for source references, confidence, veracity, and
   tool metadata; export/import and `mem_get` preserve them.
 
