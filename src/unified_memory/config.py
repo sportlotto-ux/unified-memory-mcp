@@ -107,6 +107,14 @@ def _default_importance_weight() -> float:
     return _strict_float("UM_IMPORTANCE_WEIGHT", 0.0)
 
 
+def _default_working_ttl_s() -> int:
+    return _strict_int("UM_WORKING_TTL_S", 0)
+
+
+def _default_working_limit() -> int:
+    return _strict_int("UM_WORKING_LIMIT", 20)
+
+
 def _default_retention() -> int:
     return _strict_int("UM_RETENTION_DAYS", 0)  # 0 = вечно (lossless-дефолт)
 
@@ -238,6 +246,9 @@ class Config:
     archive_recall_scan: int = field(default_factory=_default_archive_recall_scan)
     # P1.4: optional bounded importance multiplier; 0 preserves legacy ranking.
     importance_weight: float = field(default_factory=_default_importance_weight)
+    # P2.1: optional TTL for working slot-facts and bounded assembly cap.
+    working_ttl_s: int = field(default_factory=_default_working_ttl_s)
+    working_limit: int = field(default_factory=_default_working_limit)
 
     def __post_init__(self) -> None:
         if self.embedding_backend not in ("local", "openai"):
@@ -258,6 +269,10 @@ class Config:
             raise ValueError("UM_MMR_LAMBDA must be in [0, 1] (1 = pure relevance)")
         if not 0.0 <= self.importance_weight <= 1.0:
             raise ValueError("UM_IMPORTANCE_WEIGHT must be in [0, 1] (0 = off)")
+        if self.working_ttl_s < 0:
+            raise ValueError("UM_WORKING_TTL_S must be >= 0 (0 = off)")
+        if self.working_limit <= 0:
+            raise ValueError("UM_WORKING_LIMIT must be > 0")
         if self.retention_days < 0:
             raise ValueError("UM_RETENTION_DAYS must be >= 0 (0 = keep forever)")
         if self.archive_size_mb <= 0:

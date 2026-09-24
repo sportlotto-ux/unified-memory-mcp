@@ -940,6 +940,37 @@ class Store:
         return {"id": fid, "status": "noop", "superseded_id": 0}
 
     @_locked
+    def expire_working_facts(self, owner: str = "", limit: int = 1000) -> dict:
+        """Lazy-expire due working slots through the normal fact expiry path.
+
+        FTS history remains available for explicit ``include_expired`` recall;
+        the fact/edge vector is removed by ``update_fact``. The bounded batch
+        keeps read-path maintenance predictable for large legacy stores.
+        """
+        now = time.time()
+        params: list[object] = [now]
+        owner_clause = ""
+        if owner:
+            owner_clause = " AND owner=?"
+            params.append(owner)
+        rows = self.conn.execute(
+            "SELECT id, valid_until FROM um_facts WHERE category='working'"
+            " AND valid_until>0 AND valid_until<=?" + owner_clause
+            + " ORDER BY valid_until, id LIMIT ?",
+            (*params, limit)).fetchall()
+        if not rows:
+            return {"expired": 0}
+        expired = 0
+        with self.transaction():
+            for fid, valid_until in rows:
+                out = self.update_fact(
+                    int(fid), valid_until=float(valid_until), owner=owner,
+                    _commit=False)
+                if out and out.get("status") == "expired":
+                    expired += 1
+        return {"expired": expired}
+
+    @_locked
     def update_edge(self, eid: int, valid_until: float, owner: str = "",
                     _commit: bool = True) -> bool:
         """Истечение/reopen ребра (mnemosyne triple_end). Замена = новое ребро."""

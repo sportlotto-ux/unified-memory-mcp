@@ -142,11 +142,12 @@ def mem_remember(session_id: str = "default", role: str = "user",
 def mem_fact(category: str, name: str, body: str,
              importance: float = 0.5, subject: str = "",
              predicate: str = "", object: str = "",
-             session_id: str = "", owner: str = "") -> str:
-    """Save a long-term fact, optionally with a graph triple. Returns its id."""
+             session_id: str = "", owner: str = "",
+             ttl_s: int | None = None) -> str:
+    """Save a long-term fact, optionally with a graph triple and working TTL."""
     return json.dumps({"id": _ingest().remember_fact(
         category, name, body, importance, subject, predicate, object,
-        session_id, owner)})
+        session_id, owner, ttl_s=ttl_s)})
 
 
 @mcp.tool(annotations=_ann(idem=True))
@@ -425,10 +426,12 @@ def mem_compact(session_id: str, keep_tail: int = 20, owner: str = "") -> str:
 
 
 @mcp.tool(annotations=_ann(ro=True, idem=True))
-def mem_assemble(session_id: str, budget: int = 0, owner: str = "") -> str:
-    """Bounded active context: ready summaries + fresh tail within budget."""
-    return json.dumps(_ingest().window.assemble(session_id, budget, owner),
-                      ensure_ascii=False)
+def mem_assemble(session_id: str, budget: int = 0, owner: str = "",
+                 include_working: bool = False) -> str:
+    """Bounded active context, optionally including a capped working slice."""
+    return json.dumps(_ingest().window.assemble(
+        session_id, budget, owner, include_working=include_working),
+        ensure_ascii=False)
 
 
 @mcp.tool(annotations=_ann(destr=True, idem=True))

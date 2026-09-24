@@ -6,6 +6,8 @@ Lossless по умолчанию: compact пишет summaries, сырые со�
 
 from __future__ import annotations
 
+import time
+
 from .config import Config
 from .embeddings import EmbeddingBackend
 from .engine import ActiveWindow
@@ -70,42 +72,60 @@ class Ingest:
                       importance: float = 0.5, subject: str = "",
                       predicate: str = "", obj: str = "",
                       session_id: str = "", owner: str = "",
-                      _commit: bool = True) -> int:
+                      _commit: bool = True, ttl_s: int | None = None) -> int:
         """Слот-запись факта. Возвращает id живого факта (совместимость)."""
         return self.upsert_fact(category, name, body, importance, subject,
                                 predicate, obj, session_id, owner,
-                                _commit=_commit)["id"]
+                                _commit=_commit, ttl_s=ttl_s)["id"]
 
     def upsert_fact(self, category: str, name: str, body: str,
                     importance: float = 0.5, subject: str = "",
                     predicate: str = "", obj: str = "",
                     session_id: str = "", owner: str = "",
-                    _commit: bool = True) -> dict:
+                    _commit: bool = True, ttl_s: int | None = None) -> dict:
         """Слот-запись + вектора/рёбра. Возвращает {id, status, superseded_id}.
 
         status: created | superseded (новое тело) | noop (то же тело) |
         updated (только importance). Вектора/рёбра плодим лишь при created/
         superseded — при noop/updated они уже на том же id.
         """
-        name, body = self._clean(name), self._clean(body)
+        category, name, body = (self._clean(value) for value in
+                                (category, name, body))
         subject, predicate, obj = (self._clean(s) for s in (subject, predicate, obj))
+        if ttl_s is None:
+            ttl_s = self.cfg.working_ttl_s
+        try:
+            ttl_s = int(ttl_s)
+        except (TypeError, ValueError):
+            raise ValueError("ttl_s must be an integer")
+        if ttl_s < 0:
+            raise ValueError("ttl_s must be >= 0 (0 = keep forever)")
+        valid_until = time.time() + ttl_s if category == "working" and ttl_s else 0.0
         if _commit:
             with self.store.transaction():
                 out = self._upsert_fact_write(
                     category, name, body, importance, subject, predicate, obj,
-                    session_id, owner)
+                    session_id, owner, valid_until)
         else:
             out = self._upsert_fact_write(
                 category, name, body, importance, subject, predicate, obj,
-                session_id, owner)
+                session_id, owner, valid_until)
         return out
 
     def _upsert_fact_write(self, category: str, name: str, body: str,
                            importance: float, subject: str, predicate: str,
-                           obj: str, session_id: str, owner: str) -> dict:
+                           obj: str, session_id: str, owner: str,
+                           valid_until: float = 0.0) -> dict:
         out = self.store.add_fact_ex(category, name, body, importance, owner,
                                      _commit=False)
         fid = out["id"]
+        if valid_until > 0:
+            # A future deadline is metadata for the fact lifecycle, not an
+            # immediate expiry: keep the vector and edge alive until the
+            # lazy read-path invokes Store.expire_working_facts.
+            self.store.conn.execute(
+                "UPDATE um_facts SET valid_until=? WHERE id=?",
+                (valid_until, fid))
         if out["status"] in ("noop", "updated"):
             return out
         self._embed_fact(fid, _commit=False)
@@ -222,7 +242,8 @@ class Ingest:
                 self._clean(str(op.get("subject", ""))),
                 self._clean(str(op.get("predicate", ""))),
                 self._clean(str(op.get("object", ""))),
-                str(op.get("session_id", "")), owner, _commit=False)
+                str(op.get("session_id", "")), owner, _commit=False,
+                ttl_s=op.get("ttl_s"))
             return {"index": i, "op": kind, "status": out["status"],
                     "id": out["id"], "superseded_id": out["superseded_id"]}, None
         if kind == "update":
@@ -324,19 +345,26 @@ class Ingest:
                 " LEFT JOIN um_vectors v ON v.owner_table='um_summaries'"
                 " AND v.owner_id=s.id", "s"):
             jobs.append(("um_summaries", oid, body, own or ""))
-        for oid, name, body, own in query(
-                "SELECT f.id, f.name, f.body, f.owner FROM um_facts f"
+        now = time.time()
+        for oid, name, body, own, valid_until in query(
+                "SELECT f.id, f.name, f.body, f.owner, f.valid_until"
+                " FROM um_facts f"
                 " LEFT JOIN um_vectors v ON v.owner_table='um_facts'"
                 " AND v.owner_id=f.id", "f"):
+            if float(valid_until or 0.0) != 0 and float(valid_until) <= now:
+                continue
             jobs.append(("um_facts", oid, f"{name} {body}", own or ""))
-        for oid, sname, pred, oname, own in query(
+        for oid, sname, pred, oname, own, valid_until in query(
                 "SELECT e.id, COALESCE(NULLIF(s.display,''),s.name),"
-                " e.predicate, COALESCE(NULLIF(o.display,''),o.name), e.owner"
+                " e.predicate, COALESCE(NULLIF(o.display,''),o.name), e.owner,"
+                " e.valid_until"
                 " FROM um_edges e"
                 " JOIN um_entities s ON s.id=e.subject_id"
                 " JOIN um_entities o ON o.id=e.object_id"
                 " LEFT JOIN um_vectors v ON v.owner_table='um_edges'"
                 " AND v.owner_id=e.id", "e"):
+            if float(valid_until or 0.0) != 0 and float(valid_until) <= now:
+                continue
             jobs.append(("um_edges", oid, f"{sname} {pred} {oname}", own or ""))
         for oid, display, own in query(
                 "SELECT e.id, COALESCE(NULLIF(e.display,''),e.name), e.owner"

@@ -68,6 +68,7 @@ class Router:
             return []  # #5: без session_id граф/поиск вернули бы чужие данные
         if source and scope == "facts":
             return []
+        self.store.expire_working_facts(owner=owner)
         self.last_stats = {
             "dim_skipped": 0,
             "importance": {

@@ -76,7 +76,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 | Тул | Что делает |
 |---|---|
 | `mem_remember` | Сохранить сообщение; авто-компакшн при превышении порога давления |
-| `mem_fact` | Слот-факт (одно живое значение на `owner/category/name`) + опциональный триплет графа; то же тело — no-op, новое — supersede с историей |
+| `mem_fact` | Слот-факт (одно живое значение на `owner/category/name`) + опциональный триплет графа; `category=working` поддерживает opt-in `ttl_s`; то же тело — no-op, новое — supersede с историей |
 | `mem_link` | Типизированная связь (`src`/`dst` как `fact:3`/`message:12`, `rel` ∈ `supports`/`contradicts`/`supersedes`/`derives_from`). Оба конца обязаны существовать и принадлежать `owner`; повтор живой связи — no-op с тем же id |
 | `mem_graph_query` | Bounded graph traversal: exact `subject`/`predicate`/`object` для entity edges, `rel`/`min_weight` для typed links, `as_of`, `max_hops`, owner/session/liveness isolation; deterministic `edges`/`links` result |
 | `mem_batch` | Атомарный батч записей (all-or-nothing): ops `remember_fact` \| `update` (fact/edge/link) \| `forget` (fact/edge/link). `dry_run=true` — валидация с откатом. Без кросс-ссылок; каждый op в savepoint; текст идёт через redaction-гейт |
@@ -90,7 +90,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 | `mem_evidence` | Проверка опоры на refs: `cite` (дословно/почти → supported/partial/unsupported), `compute` (агрегация чисел над refs: count/sum/min/max/avg/median; pattern ≤256 символов, timeout 50ms), `conflicts` (кандидаты противоречий без вердикта, `needs_judgment`). Без LLM, только переданные refs |
 | `mem_reindex` | Доложит недостающие вектора; полная смена embedding-модели — offline `python -m unified_memory.reembed` |
 | `mem_compact` | Ручное сжатие старых сообщений (сырьё остаётся) |
-| `mem_assemble` | Bounded активный контекст: summaries + свежий хвост в бюджет токенов (бюджет считается токен-оценщиком; для жёсткой арифметики — `.[tokens]`) |
+| `mem_assemble` | Bounded активный контекст: summaries + свежий хвост в бюджет токенов; `include_working=true` добавляет ограниченный working-срез (по умолчанию legacy-поведение) |
 | `mem_forget` | Удаление по `kind`: `fact`/`edge`/`link` (id) или `entity` (имя), каскадом |
 | `mem_status` | Счётчики + флаги деградации (`vectors_enabled`, `summarizer`, `fts`) |
 | `mem_doctor` | `integrity_check`, вектора по моделям, hygiene; read-only `export` (JSON-дамп в `<db>.export-<ts>.json`, вектора base64, архив не входит), `archive_check` (заглушки ↔ архив, orphans), `secret_scan` (каталог redaction, отчёт без значений); мутации `clean`/`repair` (backup-first), `archive`/`purge`/`retention` (только с `apply=true`; `retention` — age-based вынос горячего старше `UM_RETENTION_DAYS`) |
@@ -141,7 +141,7 @@ Derived/unsupported tables остаются в `skipped_fields`; source content 
 - **Защита от старых болячек:** нет жёсткого `importance: 0.95` (причина canonical-bloat в mnemosyne) — кап `0..1`; смена embedding-модели блокирует обычный сервер, а offline `reembed` заменяет все vectors атомарно; `mem_evidence(pattern=...)` ограничен по длине и времени выполнения.
 - **Redaction:** гейт на входе (`UM_REDACT_ENABLED`, дефолт ON): `api_key,bearer_token,password_assignment,private_key` — каталог и регулярки как у LCM. Режется до SQLite/FTS/vectors/summaries, включая `mem_update`; плейсхолдер `[UM redaction: name=...; chars=N]` необратим. Forward-only: что попало в стор раньше — чистить руками + reindex.
 - **Retention/архив (lossless-холод):** `UM_RETENTION_DAYS` = **сколько держать ГОРЯЧЕЕ** (recall быстрый, БД маленькая), а не срок жизни данных. `0` (дефолт) = копим всё в горячей вечно. `>0` → раз в неделю (ленивый проход) горячее старше N дней уезжает в архив. Архив — **отдельный файл, lossless**, живёт вечно; **автоудаления нет** — физическое `purge` только вручную (`mem_doctor(mode=purge, apply=true)`). При пороге размера (`UM_ARCHIVE_SIZE_MB`, дефолт 1 ГБ) старейшее добивается до порога. В архив уезжают текст **и вектор** (вариант a2 — так порог реально держится), в горячей остаётся заглушка `[archived]`, `mem_expand` прозрачно достаёт текст из архива. Холодный recall включается только явным `mem_recall(include_archived=true)`, использует bounded scan с `UM_ARCHIVE_RECALL_SCAN_LIMIT` и не создаёт архив при чтении. Ручной `purge` режет архив по тому же `UM_RETENTION_DAYS` — то есть вычищает ровно строки старше N (при `retention_days>0` это почти весь холод, **осознанно**); при `retention_days=0` `purge` — no-op.
-- **Факты = слоты (`mem_fact`), сообщения = лог (`mem_remember`).** Один живой факт на `(owner, category, name)` — гарантирует partial unique index, не код. Новое тело вытесняет старое (`valid_until`, `superseded_by`), история lossless; `valid_until=0` = живое (sentinel). `mem_recall`/`mem_expand` прячут истёкшее (`include_expired=True` — аудит). `mem_forget` — жёсткое удаление, истечение — только `mem_update`.
+- **Факты = слоты (`mem_fact`), сообщения = лог (`mem_remember`).** Один живой факт на `(owner, category, name)` — гарантирует partial unique index, не код. Новое тело вытесняет старое (`valid_until`, `superseded_by`), история lossless; `valid_until=0` = живое (sentinel). `mem_recall`/`mem_expand` прячут истёкшее (`include_expired=True` — аудит). `category=working` может получить `UM_WORKING_TTL_S`: deadline проставляется при записи, vector удаляется существующей expire-веткой, FTS остаётся для истории. Lazy expiry срабатывает на recall/assemble, без daemon; `mem_assemble(include_working=true)` добавляет bounded working-срез. Working slot-facts не имеют отдельного `session_id` (новые таблицы запрещены), поэтому срез ограничен owner-уровнем; `session_id` по-прежнему применяется к message/summary/edge scopes. `mem_forget` — жёсткое удаление, истечение — только `mem_update`.
 - **Проверка и арифметика (`mem_evidence`).** Детерминированно, без LLM, **только над переданными `refs`** (никакого авто-поиска — иначе инструмент превращается в мини-агента с его fallback-багами). `cite`: дословное/почти-дословное вхождение claim в тело ref → `supported/partial/unsupported` (RU-морфология через дешёвый prefix-stem). `compute`: агрегация чисел из тел тех же refs (`count/sum/min/max/avg/median`); интент парсит хост-агент. `conflicts`: высокоточные кандидаты противоречий (смена значения в слоте, точная негация) **без вердикта** — судью делает LLM-хост, тул не шумит.
 
 ## Переменные окружения
@@ -168,6 +168,8 @@ Derived/unsupported tables остаются в `skipped_fields`; source content 
 | `UM_LINK_FANOUT` | `20` | `mem_recall(hops>1)`: максимум связей с узла на направление |
 | `UM_GRAPH_DECAY` | `0.5` | `mem_recall(hops>1)`: множитель score на глубину (`depth-1`) |
 | `UM_IMPORTANCE_WEIGHT` | `0.0` | Bounded ranking component для facts; `0` сохраняет legacy ranking |
+| `UM_WORKING_TTL_S` | `0` | TTL в секундах для `category=working`; `0` отключает TTL |
+| `UM_WORKING_LIMIT` | `20` | Максимум working facts в opt-in `mem_assemble` slice |
 | `UM_BATCH_MAX_OPS` | `100` | `mem_batch`: потолок числа ops (проверка до открытия транзакции) |
 | `UM_BATCH_MAX_CHARS` | `200000` | `mem_batch`: потолок суммарного payload ops |
 | `UM_REDACT_ENABLED` | `true` | Гейт секретов на входе (дефолт ON — продукт публичный) |
@@ -178,7 +180,7 @@ Derived/unsupported tables остаются в `skipped_fields`; source content 
 | `UM_COMPACT_THRESHOLD` | `0.35` | Доля окна — триггер компакшна |
 | `UM_FRESH_TAIL_COUNT` | `20` | Свежих сообщений не жмём никогда |
 | `UM_DAG_FANIN` | `5` | Нод уровня → одна выше |
-| `UM_ASSEMBLY_BUDGET` | `8000` | Токенов в `mem_assemble` по дефолту |
+| `UM_ASSEMBLY_BUDGET` | `8000` | Токенов в `mem_assemble` по дефолту, включая opt-in working slice |
 | `UM_MAX_TEXT_CHARS` | `200000` | Кап входного текста (громкий `ValueError`, не тихая обрезка) |
 | `UM_COMPACT_MAX_MSGS` | `10000` | Кап головы компакшна за проход (остаток досжимается следующим вызовом) |
 
@@ -186,7 +188,7 @@ Derived/unsupported tables остаются в `skipped_fields`; source content 
 
 Полный список отложенного — `docs/BACKLOG.md`.
 
-- Архив выносит только **сообщения** (текст+вектор) — основной драйвер роста. Истёкшие факты/рёбра и `um_summaries` — TODO (`docs/BACKLOG.md`).
+- Архив выносит только **сообщения** (текст+вектор) — основной драйвер роста. P2.1 TTL действует только на `category=working` facts; archive/retention для остальных фактов, рёбер и `um_summaries` — TODO (`docs/BACKLOG.md`).
 - Миграция upstream: P1.6 LCM/Mnemosyne adapters поддерживают dry-run/atomic apply и reconciliation report; working/episodic rows по умолчанию пропускаются, derived tables явно перечислены в `skipped_fields`.
 - `mem_doctor(mode=export)` пишет **стриминговый JSONL** (`um-export-jsonl`: header + `{table,row}` построчно; вектора base64, um_fts/um_vecidx исключены). Импорт — `python -m unified_memory.import_dump <file> [--owner] [--dry-run]`, аддитивный (fresh-id remap, слот-конфликт → skip), без backend. **Чтение дампа — целиком в память** (стриминг только на записи).
 - Isolation добровольная: `owner=""` (дефолт) — legacy без фильтра, видит всё; строгая изоляция — только при непустом `owner`. Старые БД мигрируют сами (`owner=''`), сущности пересобираются под `UNIQUE(name, owner)`.
@@ -199,7 +201,7 @@ Derived/unsupported tables остаются в `skipped_fields`; source content 
 ## Разработка
 
 ```bash
-python -m pytest tests/ -q   # текущий dev-прогон: 369 passed, 4 skipped (Python 3.14)
+python -m pytest tests/ -q   # текущий dev-прогон: 375 passed, 4 skipped (Python 3.14)
 ```
 
 Полный suite также прогоняется на Python 3.12; CI дополнительно собирает wheel,

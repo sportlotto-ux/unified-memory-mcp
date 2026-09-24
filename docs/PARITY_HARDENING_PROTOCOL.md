@@ -360,6 +360,74 @@ triples/edges и owner/bank mapping; working/episodic rows требуют явн
 - adaptive retrieval;
 - full LCM evidence controller.
 
+## 5.1 P2.1 — Working-memory TTL
+
+**Use case:** агент в рамках сессии кладёт временное (параметры задачи, промежуточные
+решения), и оно само исчезает из `mem_recall`/`mem_assemble` по истечении, без
+ручного `mem_forget`/`mem_update`.
+
+**Проблема:** временные рабочие факты остаются в recall и assembly до явного
+ручного удаления и создают лишнее давление/шум.
+
+**Пользовательский эффект:** temporary working fact имеет bounded lifetime;
+до `valid_until` он участвует в обычном recall, после дедлайна скрывается из
+обычного recall/assembly, но остаётся доступен через `include_expired=true`.
+В `mem_assemble` bounded working-срез включается только opt-in через
+`include_working=true`; default/false сохраняет прежнее поведение.
+
+**Scope:**
+
+- без новых таблиц: working — обычный `um_facts` slot-fact;
+- `valid_until = created_at + ttl_s`; `ttl_s <= 0` означает бессрочный fact;
+- `UM_WORKING_TTL_S` и `UM_WORKING_LIMIT` через strict integer config;
+- `mem_fact`/`upsert_fact` принимает TTL для `category=working`;
+- переиспользовать существующий expire lifecycle: vector удаляется, FTS остаётся;
+- lazy expiry на recall/assemble read-path, без daemon/cron;
+- opt-in bounded working assembly;
+- сохранить legacy `owner=""` semantics.
+
+Ограничение текущей схемы: `um_facts` не имеет `session_id`, а новые таблицы запрещены;
+поэтому working assembly имеет owner-scope, а не отдельный session partition.
+
+**Non-goals:**
+
+- server push, background worker и scheduler;
+- изменение owner isolation;
+- banks/shared/private, persona, scratchpad, annotations;
+- изменение Mnemosyne migration policy для `working_memory`;
+- новая схема/entity type или новый lifecycle storage.
+
+**Красные тесты:**
+
+- working fact жив до deadline, скрыт из обычного recall после deadline и виден
+  с `include_expired=true`;
+- `mem_assemble(include_working=true)` возвращает bounded working-срез в пределах
+  budget; `include_working=false`/default совпадает с legacy;
+- expired working rows не раздувают `pressure()` и не вызывают summary storm;
+- `owner=""` behavior не меняется.
+
+**Acceptance criteria:**
+
+- TTL bounded и валиден для category `working`; нерабочие категории не получают
+  скрытый TTL side effect;
+- expiration не удаляет FTS-историю и удаляет vector через существующую
+  expire-ветку;
+- обычный recall/assemble не возвращает expired working rows;
+- explicit include-expired retrieval сохраняет lineage/history semantics;
+- default ranking, legacy owner semantics и archive behavior не меняются;
+- migration `working_memory → skip` остаётся без изменений.
+
+**Rollback/failure behavior:** ошибка config validation или невалидный TTL
+отклоняется до записи; lazy expiry не требует фоновой миграции и безопасно
+обрабатывает malformed/legacy rows; transaction/vector/FTS paths используют
+существующие atomic операции.
+
+**Docs/config impact:** `README.md`, `docs/IMPORT.md` не меняют migration policy;
+документируются новые config knobs и opt-in assembly behavior.
+
+**Validation:** полный suite на Python 3.14 и 3.12, `git diff --check`, wheel
+build/install/import smoke из clean venv.
+
 ## 6. Story template
 
 Каждая story должна иметь этот блок до начала кода:
@@ -402,7 +470,8 @@ Validation:
 | P1.3 archive recall | done (uncommitted) | — | explicit include_archived bounded lexical scan; owner/session/source/scope filters; no archive creation on read; full suite 351/4 (3.14), 335/7 (3.12); wheel smoke OK |
 | P1.4 importance | done (uncommitted) | — | optional bounded centered multiplier for facts; UM_IMPORTANCE_WEIGHT default 0; diagnostics + eval ranking case; full suite 356/4 (3.14), 340/7 (3.12); wheel smoke OK |
 | P1.5 graph query | done (uncommitted) | — | mem_graph_query with exact edge filters, typed-link rel/min_weight, as_of/liveness, bounded max_hops, owner/session isolation, deterministic edges/links; full suite 360/4 (3.14), 344/7 (3.12); wheel smoke OK |
-| P1.6 migration | done (uncommitted) | — | LCM + Mnemosyne read-only SQLite adapters: dry-run default, atomic apply, reconciliation + recall checks, LCM source ordering/tool metadata, Mnemosyne fact history/graph/owner mapping, explicit working/episodic policies, skipped-field report; full suite 369/4 (3.14), 353/7 (3.12), wheel smoke OK |
+| P1.6 migration | done | `5dbf1c6` | LCM + Mnemosyne read-only SQLite adapters: dry-run default, atomic apply, reconciliation + recall checks, LCM source ordering/tool metadata, Mnemosyne fact history/graph/owner mapping, explicit working/episodic policies, skipped-field report; full suite 369/4 (3.14), 353/7 (3.12), wheel smoke OK |
+| P2.1 working TTL | done (uncommitted) | — | working slot-fact TTL, lazy expiry through existing vector/FTS lifecycle, opt-in bounded assembly, owner semantics preserved; full suite 375/4 (3.14), 359/7 (3.12), wheel smoke OK |
 
 ## 9. Final gate
 

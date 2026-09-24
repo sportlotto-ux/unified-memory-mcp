@@ -79,6 +79,10 @@ validation/conflict tables и vector blobs не переносятся авто�
 counts и причины skip видны в report. Source content, metadata payloads и
 credentials не попадают в stdout migration report.
 
+P2.1 Working-memory TTL не меняет эту policy: upstream `working_memory` по-прежнему
+не импортируется автоматически. TTL применяется только к фактам Unified с
+`category=working`, записанным через `mem_fact`.
+
 ## Проверка паритета
 
 После apply отчёт содержит `reconciliation.counts_match` и representative

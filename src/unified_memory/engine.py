@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 from .config import Config
@@ -211,8 +212,9 @@ class ActiveWindow:
         return out
 
     def assemble(self, session_id: str, budget: int = 0,
-                 owner: str = "") -> dict:
-        """Bounded активный контекст: свежие summaries + свежий хвост, по старшинству."""
+                 owner: str = "", include_working: bool = False) -> dict:
+        """Bounded active context plus an optional working-fact slice."""
+        self.store.expire_working_facts(owner=owner)
         budget = budget or self.cfg.assembly_budget
         half = budget // 2
         oc = " AND owner=?" if owner else ""
@@ -258,6 +260,35 @@ class ActiveWindow:
             tail.append(m)
             tused += t
         tail.reverse()
-        return {"summaries": picked_sums, "tail": tail,
-                "tokens": used + tused, "budget": budget,
-                "truncated_tail": len(tail) < len(msgs)}
+        out = {"summaries": picked_sums, "tail": tail,
+               "tokens": used + tused, "budget": budget,
+               "truncated_tail": len(tail) < len(msgs)}
+        if not include_working:
+            return out
+
+        remaining = max(0, budget - used - tused)
+        now = time.time()
+        params: list[object] = [now]
+        owner_clause = ""
+        if owner:
+            owner_clause = " AND owner=?"
+            params.append(owner)
+        rows = self.store.select(
+            "SELECT id, name, body FROM um_facts WHERE category='working'"
+            " AND (valid_until=0 OR valid_until>?)" + owner_clause
+            + " ORDER BY importance DESC, created_at DESC, id DESC LIMIT ?",
+            (*params, self.cfg.working_limit))
+        picked_working, working_used = [], 0
+        for fid, name, body in rows:
+            item = {"id": int(fid), "name": name, "body": body}
+            t = estimate_tokens(f"{name}: {body}")
+            if working_used + t > remaining:
+                break
+            picked_working.append(item)
+            working_used += t
+        out["working"] = picked_working
+        out["working_tokens"] = working_used
+        out["truncated_working"] = (
+            len(picked_working) < len(rows) or len(rows) >= self.cfg.working_limit)
+        out["tokens"] = used + tused + working_used
+        return out
