@@ -24,7 +24,8 @@ pip install -e .[tokens]            # рекомендуется: точный t
 > смешанном RU/EN/коде погрешность накапливается иначе, чем на однородном тексте;
 > для жёсткого бюджетного счёта ставьте `.[tokens]`.
 
-Требования: Python 3.11+, SQLite из коробки. Опционально для настоящего пересказа:
+Требования: Python 3.11+, SQLite из коробки, MCP Python SDK 2.x
+(`mcp>=2.0,<3`). Опционально для настоящего пересказа:
 
 ```bash
 export UM_SUMMARIZER_URL=http://localhost:11434/v1   # OpenAI-совместимый endpoint (ollama и др.)
@@ -82,7 +83,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 | `mem_recall` | Единый поиск: FTS + вектора + граф + RRF. `scope`: `all`/`session`/`facts`; `as_of` — срез графа на дату; `include_expired` — история; `hops>1` — BFS-обход типизированных связей и entity-графа, `rel` фильтрует связи (`supports`/`contradicts`/`supersedes`/`derives_from`; на рёбрах — `predicate`). `diagnostics=true` → `{hits, diagnostics}` (per-arm counts/вклад/timings/BFS), `false` — прежний список |
 | `mem_recent` | Temporal: что было в UTC-окне (`today`/`yesterday`/`week`/`month`/`Nd`/`date:`/`last Nh`); пагинация старых страниц через `before_ts`+`before_id`+`before_kind` из `next` (kind — тайбрейкер тия между messages/summaries) |
 | `mem_expand` | Дословно по `kind`+`id`, единая схема `{kind,id,body}` |
-| `mem_evidence` | Проверка опоры на refs: `cite` (дословно/почти → supported/partial/unsupported), `compute` (агрегация чисел над refs: count/sum/min/max/avg/median), `conflicts` (кандидаты противоречий без вердикта, `needs_judgment`). Без LLM, только переданные refs |
+| `mem_evidence` | Проверка опоры на refs: `cite` (дословно/почти → supported/partial/unsupported), `compute` (агрегация чисел над refs: count/sum/min/max/avg/median; pattern ≤256 символов, timeout 50ms), `conflicts` (кандидаты противоречий без вердикта, `needs_judgment`). Без LLM, только переданные refs |
 | `mem_reindex` | Доложит недостающие вектора (лестница после смены модели) |
 | `mem_compact` | Ручное сжатие старых сообщений (сырьё остаётся) |
 | `mem_assemble` | Bounded активный контекст: summaries + свежий хвост в бюджет токенов (бюджет считается токен-оценщиком; для жёсткой арифметики — `.[tokens]`) |
@@ -93,11 +94,11 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 ## Как это работает
 
 - **Хранение:** одна SQLite (WAL): `um_messages` + `um_summaries` (DAG) + `um_facts` + `um_entities`/`um_edges` (граф) + `um_links` (типизированные связи, traversal-only) + `um_vectors` + `um_fts` (FTS5) + `um_meta`.
-- **Эмбеддинги:** два бэкенда. `local` (дефолт репо) — fastembed, модель `paraphrase-multilingual-mpnet-base-v2` (768, не дистиллят); для лёгких стендов MiniLM-L12 через `UM_EMBEDDING_MODEL`. `openai` — OpenAI-протокол `/v1/embeddings` поверх stdlib (ноль зависимостей): так подключается локальный model2vec-сервер Hermes (`UM_EMBEDDING_BASE_URL`, дефолт `http://127.0.0.1:8127`, potion = 256 dim, авто-детект). Держи сервер uncapped — static-модели молча режут после 512 токенов при выставленном `EMBED_MAX_TOKENS`.
-- **Поиск:** FTS5 (fallback LIKE) + cosine по векторам + RRF, поверх — recency-приор (`UM_RECENCY_HALFLIFE_DAYS`, дефолт 30, 0=off), scope-bias текущей сессии (`UM_SCOPE_BIAS`, дефолт 0.15) и MMR-диверсификация по Жаккару (`UM_MMR_LAMBDA`, дефолт 0.7, 1=off). При `pip install -e .[local-vec]` + `mem_reindex` — vec0-индекс (KNN-кандидаты + точный косинусный перескоринг, паритет с brute force пробами); без индекса — честный фулскан. Без fastembed — честный FTS-режим, `mem_status` так и скажет (`vectors_enabled: false`), молчаливого «вроде ищет» нет.
-- **Сжатие:** давление = токены сессии vs `UM_CONTEXT_TOKENS × UM_COMPACT_THRESHOLD` (дефолт 200k × 0.35, как LCM). Токены: при `pip install -e .[tokens]` — точный tiktoken/cl100k, иначе детерминированная RU-aware эвристика (`ASCII/4 + не-ASCII/2`; голый `len//4` занижал кириллицу ~2.3x). Накрыло → старые (всё кроме `UM_FRESH_TAIL_COUNT` свежих) в summary depth 0; каждые `UM_DAG_FANIN` нод уровня схлопываются в уровень выше. Frontier в `um_meta` — каждое сообщение жмётся один раз. `mem_assemble` собирает bounded контекст под бюджет тем же оценщиком.
-- **Защита от старых болячек:** нет жёсткого `importance: 0.95` (причина canonical-bloat в mnemosyne) — кап `0..1`; смена embedding-модели без reindex — громкая ошибка, а не тихая деградация recall.
-- **Redaction:** гейт на входе (`UM_REDACT_ENABLED`, дефолт ON): `api_key,bearer_token,password_assignment,private_key` — каталог и регулярки как у LCM. Режется до SQLite/FTS/vectors/summaries, плейсхолдер `[UM redaction: name=...; chars=N]` необратим. Forward-only: что попало в стор раньше — чистить руками + reindex.
+- **Эмбеддинги:** два бэкенда. `local` (дефолт репо) — fastembed, модель `paraphrase-multilingual-mpnet-base-v2` (768, не дистиллят); для лёгких стендов MiniLM-L12 через `UM_EMBEDDING_MODEL`. `openai` — OpenAI-протокол `/v1/embeddings` поверх stdlib (ноль зависимостей): так подключается локальный model2vec-сервер Hermes (`UM_EMBEDDING_BASE_URL`, дефолт `http://127.0.0.1:8127`, potion = 256 dim, авто-детект). Держи сервер uncapped — static-модели молча режут после 512 токенов при выставленном `EMBED_MAX_TOKENS`. Основная запись и embedding атомарны; смена model/dim без reindex отвергается громко.
+- **Поиск:** FTS5 (fallback LIKE с тем же session-scope) + cosine по векторам + RRF, поверх — recency-приор (`UM_RECENCY_HALFLIFE_DAYS`, дефолт 30, 0=off), scope-bias текущей сессии (`UM_SCOPE_BIAS`, дефолт 0.15) и MMR-диверсификация по Жаккару (`UM_MMR_LAMBDA`, дефолт 0.7, 1=off). BFS `scope="session"` не выходит через link в узел другой сессии. При `pip install -e .[local-vec]` + `mem_reindex` — vec0-индекс (KNN-кандидаты + точный косинусный перескоринг, паритет с brute force пробами); без индекса — честный фулскан. Без fastembed — честный FTS-режим, `mem_status` так и скажет (`vectors_enabled: false`), молчаливого «вроде ищет» нет.
+- **Сжатие:** давление = токены сессии vs `UM_CONTEXT_TOKENS × UM_COMPACT_THRESHOLD` (дефолт 200k × 0.35, как LCM). Токены: при `pip install -e .[tokens]` — точный tiktoken/cl100k, иначе детерминированная RU-aware эвристика (`ASCII/4 + не-ASCII/2`; голый `len//4` занижал кириллицу ~2.3x). Накрыло → старые (всё кроме `UM_FRESH_TAIL_COUNT` свежих) в summary depth 0; каждые `UM_DAG_FANIN` нод уровня схлопываются в уровень выше. Frontier, leaf summary и condense-проходы пишутся одной транзакцией. `mem_assemble` собирает bounded контекст под бюджет тем же оценщиком.
+- **Защита от старых болячек:** нет жёсткого `importance: 0.95` (причина canonical-bloat в mnemosyne) — кап `0..1`; смена embedding-модели без reindex — громкая ошибка, а не тихая деградация recall; `mem_evidence(pattern=...)` ограничен по длине и времени выполнения.
+- **Redaction:** гейт на входе (`UM_REDACT_ENABLED`, дефолт ON): `api_key,bearer_token,password_assignment,private_key` — каталог и регулярки как у LCM. Режется до SQLite/FTS/vectors/summaries, включая `mem_update`; плейсхолдер `[UM redaction: name=...; chars=N]` необратим. Forward-only: что попало в стор раньше — чистить руками + reindex.
 - **Retention/архив (lossless-холод):** `UM_RETENTION_DAYS` = **сколько держать ГОРЯЧЕЕ** (recall быстрый, БД маленькая), а не срок жизни данных. `0` (дефолт) = копим всё в горячей вечно. `>0` → раз в неделю (ленивый проход) горячее старше N дней уезжает в архив. Архив — **отдельный файл, lossless**, живёт вечно; **автоудаления нет** — физическое `purge` только вручную (`mem_doctor(mode=purge, apply=true)`). При пороге размера (`UM_ARCHIVE_SIZE_MB`, дефолт 1 ГБ) старейшее добивается до порога. В архив уезжают текст **и вектор** (вариант a2 — так порог реально держится), в горячей остаётся заглушка `[archived]`, `mem_expand` прозрачно достаёт текст из архива. Ручной `purge` режет архив по тому же `UM_RETENTION_DAYS` — то есть вычищает ровно строки старше N (при `retention_days>0` это почти весь холод, **осознанно**); при `retention_days=0` `purge` — no-op.
 - **Факты = слоты (`mem_fact`), сообщения = лог (`mem_remember`).** Один живой факт на `(owner, category, name)` — гарантирует partial unique index, не код. Новое тело вытесняет старое (`valid_until`, `superseded_by`), история lossless; `valid_until=0` = живое (sentinel). `mem_recall`/`mem_expand` прячут истёкшее (`include_expired=True` — аудит). `mem_forget` — жёсткое удаление, истечение — только `mem_update`.
 - **Проверка и арифметика (`mem_evidence`).** Детерминированно, без LLM, **только над переданными `refs`** (никакого авто-поиска — иначе инструмент превращается в мини-агента с его fallback-багами). `cite`: дословное/почти-дословное вхождение claim в тело ref → `supported/partial/unsupported` (RU-морфология через дешёвый prefix-stem). `compute`: агрегация чисел из тел тех же refs (`count/sum/min/max/avg/median`); интент парсит хост-агент. `conflicts`: высокоточные кандидаты противоречий (смена значения в слоте, точная негация) **без вердикта** — судью делает LLM-хост, тул не шумит.
@@ -145,6 +146,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 - Архив выносит только **сообщения** (текст+вектор) — основной драйвер роста. Истёкшие факты/рёбра и `um_summaries` — TODO (`docs/BACKLOG.md`).
 - `mem_doctor(mode=export)` пишет **стриминговый JSONL** (`um-export-jsonl`: header + `{table,row}` построчно; вектора base64, um_fts/um_vecidx исключены). Импорт — `python -m unified_memory.import_dump <file> [--owner] [--dry-run]`, аддитивный (fresh-id remap, слот-конфликт → skip), без backend. **Чтение дампа — целиком в память** (стриминг только на записи).
 - Isolation добровольная: `owner=""` (дефолт) — legacy без фильтра, видит всё; строгая изоляция — только при непустом `owner`. Старые БД мигрируют сами (`owner=''`), сущности пересобираются под `UNIQUE(name, owner)`.
+- Поддерживается MCP Python SDK 2.x (`mcp>=2.0,<3`); MCP 1.x intentionally не входит в dependency contract.
 - Redaction forward-only: сторa, созданные до v0.4, могут содержать секреты — чистить руками + reindex.
 - Смена embedding-модели требует reindex (падает громко, `DimensionMismatchError`): ранние сторa на MiniLM-384 с дефолтом mpnet-768 несовместимы — пересоздайте БД или задайте `UM_EMBEDDING_MODEL` явно.
 - Cron-режима нет (демона нет), но age-based проход (а) теперь есть вручную/по cron: `mem_doctor(mode=retention, apply=true)` выносит горячее старше `UM_RETENTION_DAYS` (dry-run без `apply` считает `would_move`, идемпотентен). Ленивый недельный проход на ingest остаётся.
@@ -153,9 +155,11 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 ## Разработка
 
 ```bash
-python -m pytest tests/ -q   # 281 passed, 6 skipped без fastembed/vec/tiktoken/hypothesis; UM_LIVE_OPENAI=1 — live против 8127
+python -m pytest tests/ -q   # текущий dev-прогон: 328 passed, 4 skipped
 ```
 
+Полный suite также прогоняется на Python 3.12; CI дополнительно собирает wheel,
+устанавливает его в чистый venv и импортирует `unified_memory.server`.
 Прогон герметичен: `tests/conftest.py` снимает ambient `UM_*` (иначе шелл с
 `UM_REDACT_ENABLED=off` или `UM_EMBEDDING_BACKEND=openai` молча ронял 12 тестов).
 Тестам с env — только `monkeypatch.setenv`. `UM_LIVE_*` конфигом не считается.

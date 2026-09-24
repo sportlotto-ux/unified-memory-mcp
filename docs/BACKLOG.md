@@ -1,8 +1,15 @@
 # BACKLOG — осознанно отложенное (не блокеры релиза)
 
 Заведено по ревью 0.6.0. Ни один пункт не влияет на корректность — это рост,
-архитектура и устранение мёртвого API. Не чинить впопыхах: каждый требует
-своего мини-дизайна и теста.
+архитектура и устранение мёртвого API.
+
+## ✅ Post-0.8 hardening — закрыто в текущем цикле
+- Crash-safe archive/export/import и атомарные schema migrations.
+- Атомарная запись embedding-векторов, model/dim guard, redaction `mem_update`.
+- FTS5/LIKE session parity, BFS session-scope guard, атомарный compaction.
+- `mem_evidence(pattern=...)` получил лимит длины и timeout через `regex`.
+- MCP dependency contract зафиксирован на `mcp>=2.0,<3`; CI проверяет wheel в clean venv.
+
 
 ## Вердикт по плану 21 пункта (аудит-6) → `docs/V0.7.3_PLAN.md`
 Ревьюер одобрил быстрый набор для **v0.7.3** (A1 weight-скоринг, A4 FTS-сниппет,

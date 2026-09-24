@@ -3,7 +3,26 @@
 Все значимые изменения. Формат близок к Keep a Changelog; версии — SemVer.
 Ранние версии (0.1–0.3) сжаты: это была внутренняя сборка до публикации.
 
-## [Unreleased] — пост-0.8.0 хотфиксы (5 дефектов внешнего ревью)
+## [Unreleased] — post-0.8.0 hardening
+### Data integrity
+- Archive moves, atomic export/import validation, schema migrations, embedding writes,
+  fact updates, BFS session scope, and compaction/condensation are crash-safe and
+  transactional.
+- `mem_update` redaction is applied before persistence; `mem_evidence(pattern=...)`
+  has bounded pattern length and per-scan timeout (`regex`, 256 chars / 50ms).
+
+### Retrieval and embeddings
+- Embedding writes stamp model/dimension on first use and reject model or dimension
+  changes instead of silently mixing vector spaces.
+- FTS5/LIKE session behavior is aligned; BFS cannot traverse into nodes from another
+  session when `scope="session"`.
+
+### Packaging and CI
+- MCP Python SDK contract is explicit: `mcp>=2.0,<3`; the package uses the canonical
+  `MCPServer` API.
+- CI now builds a wheel, installs it into a clean venv, and imports the packaged server.
+
+### Previous post-0.8 fixes
 - Импорт пересобирает vecidx (`build_vec_index()` после транзакции — внутри
   нельзя: коммит разорвал бы контур; backend не нужен) — knn-плечо видит
   импортированные вектора сразу, без ручного `mem_reindex`.
