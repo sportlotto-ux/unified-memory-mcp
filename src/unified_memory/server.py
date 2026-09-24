@@ -1,7 +1,7 @@
 """MCP server: unified memory for Hermes / Claude Code / any MCP client.
 
-Tools: mem_remember mem_fact mem_link mem_graph_query mem_recall mem_expand
-       mem_get mem_inspect mem_compact mem_forget mem_status mem_doctor
+Tools: mem_remember mem_fact mem_annotate mem_link mem_graph_query mem_recall
+       mem_expand mem_get mem_inspect mem_compact mem_forget mem_status mem_doctor
 
 Run: python -m unified_memory.server  (stdio transport)
 """
@@ -164,6 +164,21 @@ def mem_link(src: str, dst: str, rel: str, weight: float = 1.0,
     return json.dumps(out, ensure_ascii=False)
 
 
+@mcp.tool(annotations=_ann(idem=True))
+def mem_annotate(target: str, kind: str, value: str = "",
+                 source: str = "", confidence: float = 1.0,
+                 owner: str = "") -> str:
+    """Annotate a ref (P2.2). target like 'fact:3' | 'message:12' |
+    'summary:2' | 'edge:5'. kind: useful | disputed | correction | note.
+    Target must exist and belong to `owner`. Same (target,kind,value,owner)
+    is a no-op returning the existing id. Metadata-only: recall unchanged."""
+    _ingest()
+    st, sid = parse_ref(target)
+    out = _STATE["ingest"].annotate(st, sid, kind, value, source,
+                                    confidence, owner)
+    return json.dumps(out, ensure_ascii=False)
+
+
 @mcp.tool(annotations=_ann(ro=True, idem=True))
 def mem_graph_query(subject: str = "", predicate: str = "", object: str = "",
                     rel: str = "", min_weight: float = 0.0,
@@ -311,6 +326,7 @@ def mem_get(kind: str, id: int, owner: str = "") -> str:
         "kind": kind, "id": int(id), "found": True, "body": body,
         "archived": archived, "metadata": details["metadata"],
         "vector": details["vector"], "links": details["links"],
+        "annotations": details.get("annotations", []),
     }, ensure_ascii=False)
 
 
@@ -436,8 +452,8 @@ def mem_assemble(session_id: str, budget: int = 0, owner: str = "",
 
 @mcp.tool(annotations=_ann(destr=True, idem=True))
 def mem_forget(id: str = "", kind: str = "fact", owner: str = "") -> str:
-    """Delete by kind: fact (numeric id), edge (numeric id), link (numeric id), entity (name)."""
-    if kind in ("fact", "edge", "link"):
+    """Delete by kind: fact (numeric id), edge (numeric id), link (numeric id), annotation (numeric id), entity (name)."""
+    if kind in ("fact", "edge", "link", "annotation"):
         try:
             oid = int(id)
         except (TypeError, ValueError):
@@ -446,12 +462,14 @@ def mem_forget(id: str = "", kind: str = "fact", owner: str = "") -> str:
             return json.dumps({"deleted": _store().delete_fact(oid, owner)})
         if kind == "edge":
             return json.dumps({"deleted": _store().delete_edge(oid, owner)})
+        if kind == "annotation":
+            return json.dumps({"deleted": _store().delete_annotation(oid, owner)})
         return json.dumps({"deleted": _store().delete_link(oid, owner)})
     if kind == "entity":
         if not (id or "").strip():
             raise ValueError("kind='entity' needs a name")
         return json.dumps({"deleted": _store().delete_entity(id, owner)})
-    raise ValueError(f"unknown kind {kind!r}: fact | edge | link | entity")
+    raise ValueError(f"unknown kind {kind!r}: fact | edge | link | annotation | entity")
 
 
 @mcp.tool(annotations=_ann(idem=True))
@@ -582,7 +600,7 @@ def _secret_scan(store, patterns, cap: int = 50) -> dict:
     active = [p for p in patterns if p in PATTERNS]
     sources = [("um_messages", "content"), ("um_facts", "body"),
                ("um_summaries", "body"), ("um_entities", "name"),
-               ("um_edges", "predicate")]
+               ("um_edges", "predicate"), ("um_annotations", "value")]
     hits: list = []
     total = 0
     with store.read_locked():  # проход мимо _locked-методов: лочим явно

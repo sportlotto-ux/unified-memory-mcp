@@ -144,6 +144,21 @@ CREATE TABLE IF NOT EXISTS um_edges (
 -- ADR-001: типизированные связи памяти (message<->fact, fact<->fact).
 -- Traversal-only: ни FTS, ни векторов; um_edges (entity-граф) не трогаем.
 {_links_table_sql("um_links")}
+
+-- P2.2: пометки поверх refs (metadata-only: ни FTS, ни векторов, recall не меняют).
+CREATE TABLE IF NOT EXISTS um_annotations (
+    id INTEGER PRIMARY KEY,
+    target_table TEXT NOT NULL CHECK (target_table IN
+        ('um_messages', 'um_facts', 'um_summaries', 'um_edges')),
+    target_id INTEGER NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN
+        ('useful', 'disputed', 'correction', 'note')),
+    value TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '',
+    confidence REAL NOT NULL DEFAULT 1.0 CHECK (confidence >= 0 AND confidence <= 1),
+    owner TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL
+);
 """
 
 _INDEXES = [
@@ -174,6 +189,12 @@ _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_um_links_owner ON um_links(owner)",
     "CREATE UNIQUE INDEX IF NOT EXISTS ux_um_links_live ON um_links("
     "src_table, src_id, dst_table, dst_id, rel, owner) WHERE valid_until = 0",
+    # P2.2: пометки. Дedupe — одна пометка на (target, kind, value, owner).
+    "CREATE INDEX IF NOT EXISTS idx_um_annotations_target"
+    " ON um_annotations(target_table, target_id)",
+    "CREATE INDEX IF NOT EXISTS idx_um_annotations_owner ON um_annotations(owner)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_um_annotations_dedupe ON um_annotations("
+    "target_table, target_id, kind, value, owner)",
 ]
 
 _FTS_SCHEMA = """
@@ -286,6 +307,10 @@ class Hit:
 # ADR-001: закрытые словари связей. Расширение — миграцией (CHECK + DDL).
 LINK_RELS = ("supports", "contradicts", "supersedes", "derives_from")
 LINK_TABLES = ("um_messages", "um_facts", "um_summaries", "um_edges")
+
+# P2.2: пометки поверх тех же 4 таблиц. Расширение kind — миграцией (CHECK + DDL).
+ANNOTATION_KINDS = ("useful", "disputed", "correction", "note")
+ANNOTATION_TABLES = LINK_TABLES
 
 
 _LINK_CHECK_PATTERNS = (
@@ -1443,6 +1468,9 @@ class Store:
             if not row or (row[0] or "") != owner:
                 return False
         cur = self.conn.execute("DELETE FROM um_facts WHERE id=?", (fid,))
+        self.conn.execute(
+            "DELETE FROM um_annotations WHERE target_table='um_facts' AND target_id=?",
+            (fid,))
         self._vec_delete("um_facts", fid)
         self.conn.execute("DELETE FROM um_vectors WHERE owner_table='um_facts' AND owner_id=?", (fid,))
         if self.fts:
@@ -1454,6 +1482,9 @@ class Store:
             "SELECT id FROM um_edges WHERE fact_id=?", (fid,))]
         for eid in edge_ids:
             self.conn.execute("DELETE FROM um_edges WHERE id=?", (eid,))
+            self.conn.execute(
+                "DELETE FROM um_annotations WHERE target_table='um_edges' AND target_id=?",
+                (eid,))
             self.conn.execute(
                 "DELETE FROM um_vectors WHERE owner_table='um_edges' AND owner_id=?", (eid,))
             if self.fts:
@@ -1585,8 +1616,9 @@ class Store:
             links.append(dict(zip(
                 ["src_table", "src_id", "dst_table", "dst_id", "rel", "weight",
                  "owner", "valid_until"], row)))
+        annotations = self.annotations_for(owner_table, owner_id, owner=owner or "")
         return {"body": body, "session_id": session_id, "metadata": metadata,
-                "vector": vector, "links": links}
+                "vector": vector, "links": links, "annotations": annotations}
 
 
     @_locked
@@ -1933,6 +1965,9 @@ class Store:
         self._vec_delete("um_edges", eid)
         self.conn.execute("DELETE FROM um_edges WHERE id=?", (eid,))
         self.conn.execute(
+            "DELETE FROM um_annotations WHERE target_table='um_edges' AND target_id=?",
+            (eid,))
+        self.conn.execute(
             "DELETE FROM um_vectors WHERE owner_table='um_edges' AND owner_id=?", (eid,))
         if self.fts:
             self.conn.execute(
@@ -2107,6 +2142,95 @@ class Store:
         if owner and (row[0] or "") != owner:
             return False
         self.conn.execute("DELETE FROM um_links WHERE id=?", (lid,))
+        self._commit_if(_commit)
+        return True
+
+    @_locked
+    def annotate(self, target_table: str, target_id: int, kind: str,
+                 value: str = "", source: str = "",
+                 confidence: float = 1.0, owner: str = "",
+                 _commit: bool = True) -> dict:
+        """P2.2: пометка поверх ref. Повтор тех же (target,kind,value,owner) — no-op.
+
+        Цель обязана существовать и принадлежать owner (legacy '' видит всё).
+        Metadata-only: FTS/вектора не трогаем, recall не меняется.
+        """
+        import time as _t
+        target_table = {"message": "um_messages", "fact": "um_facts",
+                        "summary": "um_summaries", "edge": "um_edges"}.get(
+                            target_table, target_table)
+        if target_table not in ANNOTATION_TABLES:
+            raise ValueError(
+                f"bad target table {target_table!r}; ожидаю {list(ANNOTATION_TABLES)}")
+        if kind not in ANNOTATION_KINDS:
+            raise ValueError(f"unknown kind {kind!r}: {list(ANNOTATION_KINDS)}")
+        try:
+            confidence = float(confidence)
+        except (TypeError, ValueError):
+            raise ValueError("confidence must be a number in [0, 1]")
+        if not 0.0 <= confidence <= 1.0:
+            raise ValueError("confidence must be in [0, 1]")
+        row = self.conn.execute(
+            f"SELECT owner FROM {target_table} WHERE id=?", (int(target_id),)).fetchone()
+        if row is None:
+            raise ValueError(f"target {target_table}:{target_id} not found")
+        if (row[0] or "") != owner:
+            raise ValueError(f"target {target_table}:{target_id} owner mismatch")
+        key = (target_table, int(target_id), kind, value or "", owner)
+        ex = self.conn.execute(
+            "SELECT id FROM um_annotations WHERE target_table=? AND target_id=?"
+            " AND kind=? AND value=? AND owner=?", key).fetchone()
+        if ex:
+            return {"id": ex[0], "created": False}
+        try:
+            cur = self.conn.execute(
+                "INSERT INTO um_annotations(target_table, target_id, kind, value,"
+                " source, confidence, owner, created_at)"
+                " VALUES(?,?,?,?,?,?,?,?)",
+                (target_table, int(target_id), kind, value or "", source or "",
+                 confidence, owner, _t.time()))
+            aid = cur.lastrowid
+            self._commit_if(_commit)
+        except sqlite3.IntegrityError:
+            ex = self.conn.execute(
+                "SELECT id FROM um_annotations WHERE target_table=? AND target_id=?"
+                " AND kind=? AND value=? AND owner=?", key).fetchone()
+            if not ex:
+                raise
+            return {"id": ex[0], "created": False}
+        return {"id": aid, "created": True}
+
+    @_locked
+    def annotations_for(self, target_table: str, target_id: int,
+                        owner: str = "") -> list[dict]:
+        """Пометки цели. owner задан — только его; '' — legacy без фильтра."""
+        target_table = {"message": "um_messages", "fact": "um_facts",
+                        "summary": "um_summaries", "edge": "um_edges"}.get(
+                            target_table, target_table)
+        if target_table not in ANNOTATION_TABLES:
+            return []
+        sql = ("SELECT id, kind, value, source, confidence, owner, created_at"
+               " FROM um_annotations WHERE target_table=? AND target_id=?")
+        params: list[object] = [target_table, int(target_id)]
+        if owner:
+            sql += " AND owner=?"
+            params.append(owner)
+        sql += " ORDER BY id"
+        return [dict(zip(
+            ["id", "kind", "value", "source", "confidence", "owner", "created_at"],
+            row)) for row in self.conn.execute(sql, params)]
+
+    @_locked
+    def delete_annotation(self, aid: int, owner: str = "",
+                          _commit: bool = True) -> bool:
+        """Жёсткое удаление пометки (GDPR-hatch)."""
+        row = self.conn.execute(
+            "SELECT owner FROM um_annotations WHERE id=?", (int(aid),)).fetchone()
+        if not row:
+            return False
+        if owner and (row[0] or "") != owner:
+            return False
+        self.conn.execute("DELETE FROM um_annotations WHERE id=?", (int(aid),))
         self._commit_if(_commit)
         return True
 

@@ -189,6 +189,22 @@ class Ingest:
             self._embed_fact(out["id"], _commit=False)
         return out
 
+    def annotate(self, target_table: str, target_id: int, kind: str,
+                 value: str = "", source: str = "",
+                 confidence: float = 1.0, owner: str = "",
+                 _commit: bool = True) -> dict:
+        """P2.2: пометка поверх ref. Текст — через _clean (redaction-гейт)."""
+        value = self._clean(value or "")
+        source = self._clean(source or "")
+        if _commit:
+            with self.store.transaction():
+                return self.store.annotate(
+                    target_table, int(target_id), kind, value, source,
+                    confidence, owner, _commit=False)
+        return self.store.annotate(
+            target_table, int(target_id), kind, value, source,
+            confidence, owner, _commit=False)
+
     def batch(self, ops: list[dict], dry_run: bool = False,
               owner: str = "") -> dict:
         """Атомарный батч записей (v0.7-п.5b). Все op в одном контуре; ошибка

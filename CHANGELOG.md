@@ -13,6 +13,9 @@
 - P2.1: working slot-fact TTL with lazy expiry on recall/assemble, vector/FTS
   lifecycle preservation, `UM_WORKING_TTL_S`, `UM_WORKING_LIMIT`, and opt-in
   `mem_assemble(include_working=true)`.
+- P2.2: `um_annotations` metadata-only layer with `mem_annotate`, `mem_get`
+  exposure, `mem_forget(kind=annotation)`, target cascade, and export/import
+  remap; recall/assembly ranking unchanged.
 - Migration metadata columns for source references, confidence, veracity, and
   tool metadata; export/import and `mem_get` preserve them.
 

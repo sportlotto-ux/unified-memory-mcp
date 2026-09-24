@@ -428,6 +428,61 @@ triples/edges и owner/bank mapping; working/episodic rows требуют явн
 **Validation:** полный suite на Python 3.14 и 3.12, `git diff --check`, wheel
 build/install/import smoke из clean venv.
 
+## 5.2 P2.2 — Annotations поверх refs
+
+**Use case:** агент помечает уже выданный ref (`fact:3`/`message:12`/
+`summary:2`/`edge:5`) пометкой `useful/disputed/correction/note`, чтобы позже
+`mem_get` видел пометки. Ранжирование `mem_recall` по умолчанию не меняется.
+
+**Проблема:** негде хранить verdict-free пометки агента без создания фактов-мусора
+и без изменения recall-контракта.
+
+**Пользовательский эффект:** пометка живёт на цели, видна в `mem_get`,
+переживает `export/import`, удаляется вместе с целью или явным
+`mem_forget(kind=annotation)`; повтор той же пометки — idempotent no-op.
+
+**Scope:**
+
+- новая таблица `um_annotations` (metadata-only: ни FTS, ни векторов);
+- `kind` ограничен `useful/disputed/correction/note` (CHECK + код);
+- цели — те же 4 таблицы, что у `um_links`; цель обязана существовать
+  и принадлежать `owner` (legacy `''` видит всё);
+- dedupe `(target_table, target_id, kind, value, owner)`;
+- текст `value`/`source` через redaction-гейт `Ingest._clean`;
+- `mem_annotate` (non-destructive, idempotent), `mem_get` отдаёт `annotations`,
+  `mem_forget(kind=annotation)`, каскад при удалении цели;
+- `secret_scan` покрывает `um_annotations.value`.
+
+**Non-goals:**
+
+- влияние на `mem_recall`/`mem_assemble` ranking (пометки их не меняют);
+- batch-ops для пометок, фоновый worker/scheduler;
+- изменение owner isolation и `working_memory → skip` migration policy;
+- автоперенос upstream-таблицы `annotations` (остаётся `not_in_scope`,
+  unified-пометки — отдельный слой).
+
+**Красные тесты** (`tests/test_annotations_data.py`, 7 шт.): create + no-op,
+rejects (kind/target/owner), `mem_get` exposure, forget + cascade, owner
+isolation + legacy, redaction, recall/assemble invariance.
+
+**Acceptance criteria:**
+
+- чужая/несуществующая цель — отказ без записи;
+- `confidence` вне `[0,1]` — отказ;
+- обычный recall/assemble бит-в-бит до и после пометок;
+- export/import несут пометки с remap целей;
+- default ranking, legacy owner semantics, archive behavior не меняются.
+
+**Rollback/failure behavior:** невалидный kind/target/confidence отклоняется
+до записи; всё в `Store.transaction()`; удаление цели каскадом чистит пометки,
+сирот не остаётся.
+
+**Docs/config impact:** `README.md` (20 тулов), `docs/IMPORT.md`
+(upstream-policy без изменений), новых `UM_*` нет.
+
+**Validation:** полный suite на Python 3.14 и 3.12, `git diff --check`, wheel
+build/install/import smoke из clean venv.
+
 ## 6. Story template
 
 Каждая story должна иметь этот блок до начала кода:
@@ -471,7 +526,8 @@ Validation:
 | P1.4 importance | done (uncommitted) | — | optional bounded centered multiplier for facts; UM_IMPORTANCE_WEIGHT default 0; diagnostics + eval ranking case; full suite 356/4 (3.14), 340/7 (3.12); wheel smoke OK |
 | P1.5 graph query | done (uncommitted) | — | mem_graph_query with exact edge filters, typed-link rel/min_weight, as_of/liveness, bounded max_hops, owner/session isolation, deterministic edges/links; full suite 360/4 (3.14), 344/7 (3.12); wheel smoke OK |
 | P1.6 migration | done | `5dbf1c6` | LCM + Mnemosyne read-only SQLite adapters: dry-run default, atomic apply, reconciliation + recall checks, LCM source ordering/tool metadata, Mnemosyne fact history/graph/owner mapping, explicit working/episodic policies, skipped-field report; full suite 369/4 (3.14), 353/7 (3.12), wheel smoke OK |
-| P2.1 working TTL | done (uncommitted) | — | working slot-fact TTL, lazy expiry through existing vector/FTS lifecycle, opt-in bounded assembly, owner semantics preserved; full suite 375/4 (3.14), 359/7 (3.12), wheel smoke OK |
+| P2.1 working TTL | done | `bc2aec3` | working slot-fact TTL, lazy expiry through existing vector/FTS lifecycle, opt-in bounded assembly, owner semantics preserved; full suite 375/4 (3.14), 359/7 (3.12), wheel smoke OK |
+| P2.2 annotations | done (uncommitted) | — | um_annotations metadata-only layer, mem_annotate/mem_get/mem_forget, cascade + export/import remap, recall invariant; full suite 382/4 (3.14), wheel smoke OK |
 
 ## 9. Final gate
 

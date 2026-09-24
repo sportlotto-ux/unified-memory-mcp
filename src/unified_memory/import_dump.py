@@ -41,7 +41,8 @@ SUPPORTED = ("1",)
 
 # Вставляемые таблицы в порядке зависимостей.
 IMPORT_TABLES = ("um_entities", "um_facts", "um_messages", "um_summaries",
-                 "um_summary_sources", "um_edges", "um_links", "um_vectors")
+                 "um_summary_sources", "um_edges", "um_links", "um_annotations",
+                 "um_vectors")
 # um_meta читаем (schema_version), um_fts/um_vecidx — производные (legacy-дампы
 # их содержат), при импорте игнорируются: FTS пересобирается, vecidx — reindex.
 IGNORED = ("um_meta", "um_fts", "um_vecidx")
@@ -294,6 +295,38 @@ def _links(store, rows, maps, owner, rep):
         rep["um_links"]["inserted"] += 1
 
 
+def _annotations(store, rows, maps, owner, rep):
+    for r in rows:
+        own = _own(owner, r)
+        tt = r["target_table"]
+        nid = maps.get(tt, {}).get(r["target_id"])
+        if nid is None:  # цель не вставлена → пометка не нужна
+            rep["um_annotations"]["skipped"] += 1
+            continue
+        if r.get("kind") not in ("useful", "disputed", "correction", "note"):
+            rep["um_annotations"]["skipped"] += 1
+            continue
+        ex = store.conn.execute(
+            "SELECT id FROM um_annotations WHERE target_table=? AND target_id=?"
+            " AND kind=? AND value=? AND owner=?",
+            (tt, nid, r["kind"], r.get("value") or "", own)).fetchone()
+        if ex:
+            rep["um_annotations"]["skipped"] += 1
+            continue
+        try:
+            store.conn.execute(
+                "INSERT INTO um_annotations(target_table, target_id, kind, value,"
+                " source, confidence, owner, created_at)"
+                " VALUES(?,?,?,?,?,?,?,?)",
+                (tt, nid, r["kind"], r.get("value") or "", r.get("source") or "",
+                 float(r.get("confidence", 1.0)), own,
+                 float(r.get("created_at") or 0.0)))
+        except Exception:
+            rep["um_annotations"]["skipped"] += 1
+            continue
+        rep["um_annotations"]["inserted"] += 1
+
+
 def _vectors(store, rows, maps, owner, rep, target_dim):
     for r in rows:
         ot = r["owner_table"]
@@ -336,6 +369,7 @@ def import_dump(store: Store, path: str | Path, owner: str | None = None,
         maps = {"um_entities": emap, "um_facts": fmap, "um_messages": mmap,
                 "um_summaries": smap, "um_edges": edgemap}
         _links(store, tables.get("um_links", []), maps, owner, rep)
+        _annotations(store, tables.get("um_annotations", []), maps, owner, rep)
         _vectors(store, vec_rows, maps, owner, rep, target_dim)
         # Imported rows bypass Store write helpers; invalidate all derived
         # pressure state so the next read rebuilds it from durable rows.

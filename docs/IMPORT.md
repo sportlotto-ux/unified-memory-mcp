@@ -83,6 +83,10 @@ P2.1 Working-memory TTL не меняет эту policy: upstream `working_memor
 не импортируется автоматически. TTL применяется только к фактам Unified с
 `category=working`, записанным через `mem_fact`.
 
+P2.2 Unified annotations — отдельный слой (`um_annotations`): upstream-таблица
+`annotations` по-прежнему `not_in_scope` и не импортируется; пометки Unified
+переживают собственный export/import с remap целей.
+
 ## Проверка паритета
 
 После apply отчёт содержит `reconciliation.counts_match` и representative
