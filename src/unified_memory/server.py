@@ -3,6 +3,7 @@
 Tools: mem_remember mem_fact mem_annotate mem_link mem_graph_query mem_recall
        mem_expand mem_get mem_inspect mem_compact mem_forget mem_status mem_doctor
        mem_validate mem_task mem_persona mem_extract
+       mem_bank_share mem_bank_unshare
 
 Run: python -m unified_memory.server  (stdio transport)
 """
@@ -145,11 +146,12 @@ def mem_fact(category: str, name: str, body: str,
              importance: float = 0.5, subject: str = "",
              predicate: str = "", object: str = "",
              session_id: str = "", owner: str = "",
-             ttl_s: int | None = None) -> str:
-    """Save a long-term fact, optionally with a graph triple and working TTL."""
+             ttl_s: int | None = None, bank: str = "") -> str:
+    """Save a long-term fact, optionally with a graph triple and working TTL.
+    bank (P2.7): named sharing scope, ^[A-Za-z0-9_-]{1,64}$; '' = private."""
     return json.dumps({"id": _ingest().remember_fact(
         category, name, body, importance, subject, predicate, object,
-        session_id, owner, ttl_s=ttl_s)})
+        session_id, owner, ttl_s=ttl_s, bank=bank)})
 
 
 @mcp.tool(annotations=_ann(idem=True))
@@ -291,7 +293,11 @@ def mem_expand(kind: str, id: int, owner: str = "") -> str:
              "edge": "um_edges"}.get(kind)
     if table is None:
         raise ValueError(f"unknown kind {kind!r}: message | fact | summary | edge")
-    if owner and _store().owners_for([(table, int(id))]).get((table, int(id)), "") != owner:
+    if table == "um_facts":
+        # P2.7: видимость покрывает owner-check (своя/грант/legacy "").
+        if not _store().bank_visible(table, int(id), owner):
+            return json.dumps({"kind": kind, "id": int(id), "body": None}, ensure_ascii=False)
+    elif owner and _store().owners_for([(table, int(id))]).get((table, int(id)), "") != owner:
         return json.dumps({"kind": kind, "id": int(id), "body": None}, ensure_ascii=False)
     body, _ = _store()._body_of(table, int(id))
     meta = _store().row_meta(table, int(id))  # valid_until / superseded_by
@@ -593,6 +599,31 @@ def mem_persona(op: str = "get", trait: str = "", body: str = "",
         return json.dumps({"traits": traits, "count": len(traits)},
                           ensure_ascii=False)
     raise ValueError(f"unknown op {op!r}: set | get")
+
+
+@mcp.tool(annotations=_ann(idem=True))
+def mem_bank_share(bank: str, grantee: str, owner: str = "") -> str:
+    """Share own bank for reading (P2.7). Grants are read-only: the grantee
+    sees the bank's facts via recall/get/evidence/expand but cannot write.
+    Re-sharing is a no-op returning the existing id (granted=false).
+    Default bank ('') is private and cannot be shared."""
+    _ingest()
+    if not owner:
+        raise ValueError("owner is required: banks belong to a named owner")
+    out = _store().share_bank(owner, (bank or "").strip(),
+                              (grantee or "").strip())
+    return json.dumps(out, ensure_ascii=False)
+
+
+@mcp.tool(annotations=_ann(idem=True))
+def mem_bank_unshare(bank: str, grantee: str, owner: str = "") -> str:
+    """Revoke a bank grant (P2.7). Removes read access, destroys no data."""
+    _ingest()
+    if not owner:
+        raise ValueError("owner is required: banks belong to a named owner")
+    out = _store().unshare_bank(owner, (bank or "").strip(),
+                                (grantee or "").strip())
+    return json.dumps(out, ensure_ascii=False)
 
 
 @mcp.tool(annotations=_ann(ro=True))

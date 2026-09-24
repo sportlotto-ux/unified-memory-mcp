@@ -98,11 +98,23 @@ CREATE TABLE IF NOT EXISTS um_facts (
     confidence REAL NOT NULL DEFAULT 1.0,
     veracity TEXT NOT NULL DEFAULT '',
     source_ref TEXT NOT NULL DEFAULT '',
+    -- P2.7: именованный банк шаринга; '' = приватный дефолт без изменений.
+    bank TEXT NOT NULL DEFAULT '',
     -- Слот-семантика (v0.5): 0 = живое (sentinel!), иначе timestamp истечения.
     -- NOT NULL обязателен: NULL-строки выпали бы из WHERE valid_until=0
     -- и обошли бы partial unique index ниже.
     valid_until REAL NOT NULL DEFAULT 0,
     superseded_by INTEGER NOT NULL DEFAULT 0  -- цепочка версий, как у саммари
+);
+
+-- P2.7: read-only гранты на банки. Строка (bank_owner, bank) принадлежит
+-- bank_owner; grantee получает чтение фактов этого банка. Записи грант не даёт.
+CREATE TABLE IF NOT EXISTS um_grants (
+    id INTEGER PRIMARY KEY,
+    bank_owner TEXT NOT NULL DEFAULT '',
+    bank TEXT NOT NULL DEFAULT '',
+    grantee TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL
 );
 
 
@@ -180,10 +192,17 @@ _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_um_edges_session ON um_edges(session_id)",
     "CREATE INDEX IF NOT EXISTS idx_um_edges_owner ON um_edges(owner, session_id)",
     "CREATE INDEX IF NOT EXISTS idx_um_entities_owner ON um_entities(owner)",
-    # v0.5: один живой факт на слот (owner, category, name). Partial по sentinel 0.
+    # v0.5: один живой факт на слот (owner, bank, category, name).
+    # P2.7 добавил bank; старые БД проходят drop+recreate в _migrate_bank_index.
     # Создаётся ПОСЛЕ миграции и dedupe — иначе падает на грязной БД.
     "CREATE UNIQUE INDEX IF NOT EXISTS ux_um_facts_live"
-    " ON um_facts(owner, category, name) WHERE valid_until = 0",
+    " ON um_facts(owner, bank, category, name) WHERE valid_until = 0",
+    # P2.7: гранты. Dedupe — один грант на (bank_owner, bank, grantee).
+    "CREATE INDEX IF NOT EXISTS idx_um_grants_bank"
+    " ON um_grants(bank_owner, bank)",
+    "CREATE INDEX IF NOT EXISTS idx_um_grants_grantee ON um_grants(grantee)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_um_grants_dedupe ON um_grants("
+    "bank_owner, bank, grantee)",
     # ADR-001: связи. D3 — одна живая связь на (src, dst, rel, owner).
     "CREATE INDEX IF NOT EXISTS idx_um_links_src ON um_links(src_table, src_id)",
     "CREATE INDEX IF NOT EXISTS idx_um_links_dst ON um_links(dst_table, dst_id)",
@@ -328,6 +347,19 @@ TASK_TRANSITIONS = {
 # один живой на (owner, trait); удаление — обычным mem_forget(kind=fact).
 PERSONA_CATEGORY = "persona"
 
+# P2.7: банки шаринга. Имя — идентификатор скоупа: строго алфанумерик,
+# чтобы не тащить escaping/норму через все границы чтения.
+BANK_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _check_bank(bank: str) -> str:
+    """Валидация имени банка. '' = приватный дефолт (расшарить нельзя)."""
+    bank = bank or ""
+    if bank and not BANK_RE.match(bank):
+        raise ValueError(
+            f"bad bank {bank!r}: ожидаю ^[A-Za-z0-9_-]{{1,64}}$")
+    return bank
+
 
 def _task_status_of(metadata_json: str) -> str:
     """Статус задачи из metadata_json; отсутствие = open (backward compat)."""
@@ -372,6 +404,10 @@ class Store:
         # v0.4-п.2: owner-колонки. '' = legacy без изоляции, поведение не меняется.
         self._migrate_owner_columns()
         self._migrate_entity_owner()
+        # P2.7: bank-колонка фактов + пересборка живого индекса под
+        # (owner, bank, category, name). Старые БД без дублей — безопасно.
+        self._migrate_bank_columns()
+        self._migrate_bank_index()
         # v0.5: valid_until (sentinel 0 = живое) + superseded_by на фактах.
         self._migrate_validity_columns()
         # v0.7: um_links получил CHECK на концы/вес ПОСЛЕ первых прогонов.
@@ -480,6 +516,34 @@ class Store:
         # The old table is authoritative, or the staging copy is stale.
         self.conn.execute("DROP TABLE um_entities_new")
         self.conn.commit()
+
+    def _migrate_bank_columns(self) -> None:
+        """P2.7: bank-колонка фактов на legacy-БД (паттерн _migrate_owner_columns)."""
+        cols = {row[1] for row in self.conn.execute(
+            "PRAGMA table_info(um_facts)")}
+        if "bank" in cols:
+            return
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            self.conn.execute(
+                "ALTER TABLE um_facts ADD COLUMN bank TEXT NOT NULL DEFAULT ''")
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def _migrate_bank_index(self) -> None:
+        """P2.7: старый живой индекс без bank — drop; новый создаст _INDEXES.
+
+        Безопасно: старый индекс запрещал дубли, новых дублей взяться негде.
+        Вызывается ДО _idx/dedupe-проверки в __init__.
+        """
+        row = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index'"
+            " AND name='ux_um_facts_live'").fetchone()
+        if row and row[0] and "bank" not in row[0]:
+            self.conn.execute("DROP INDEX ux_um_facts_live")
+            self.conn.commit()
 
     def _migrate_entity_owner(self) -> None:
         """Rebuild legacy um_entities atomically for owner-aware uniqueness."""
@@ -833,25 +897,27 @@ class Store:
     @_locked
     def add_fact_ex(self, category: str, name: str, body: str,
                     importance: float = 0.5, owner: str = "",
-                    _commit: bool = True) -> dict:
+                    _commit: bool = True, bank: str = "") -> dict:
         """Слот-запись с полным статусом: {id, status, superseded_id}."""
         return self._upsert_fact(category, name, body, importance, owner,
-                                 _commit=_commit)
+                                 _commit=_commit, bank=bank)
 
     def _upsert_fact(self, category: str, name: str, body: str,
                      importance: float, owner: str = "",
-                     _depth: int = 0, _commit: bool = True) -> dict:
+                     _depth: int = 0, _commit: bool = True,
+                     bank: str = "") -> dict:
         """Ядро слот-семантики (v0.5). Без лока — из locked-контекста.
 
-        Живой слот = (owner, category, name, valid_until=0); partial unique index
+        Живой слот = (owner, bank, category, name, valid_until=0); partial unique index
         делает «два живых» невозможными на уровне БД. Expire-then-insert
         атомарен внутри @_locked, IntegrityError — только backstop на гонку.
         """
         importance = max(0.0, min(1.0, importance))  # кап вместо жёстких 0.95
         now = time.time()
         row = self.conn.execute(
-            "SELECT id, body, importance, metadata_json FROM um_facts WHERE owner=? AND category=?"
-            " AND name=? AND valid_until=0", (owner, category, name)).fetchone()
+            "SELECT id, body, importance, metadata_json FROM um_facts WHERE owner=? AND bank=?"
+            " AND category=? AND name=? AND valid_until=0",
+            (owner, bank, category, name)).fetchone()
         if row is not None:
             fid, old_body, old_imp, old_meta = row
             if old_body == body:
@@ -869,18 +935,18 @@ class Store:
                     "UPDATE um_facts SET valid_until=?, updated_at=? WHERE id=?",
                     (now, now, fid))
                 cur = self.conn.execute(
-                    "INSERT INTO um_facts(owner, category, name, body, importance,"
+                    "INSERT INTO um_facts(owner, bank, category, name, body, importance,"
                     " created_at, updated_at, valid_until, superseded_by,"
                     " metadata_json)"
-                    " VALUES(?,?,?,?,?,?,?,0,0,?)",
-                    (owner, category, name, body, importance, now, now,
+                    " VALUES(?,?,?,?,?,?,?,?,0,0,?)",
+                    (owner, bank, category, name, body, importance, now, now,
                      old_meta or ""))
             except sqlite3.IntegrityError:
                 self._abort()
                 if _depth >= 1:
                     raise
                 return self._upsert_fact(category, name, body, importance, owner,
-                                         _depth + 1, _commit=_commit)
+                                         _depth + 1, _commit=_commit, bank=bank)
             nid = cur.lastrowid
             self.conn.execute(
                 "UPDATE um_facts SET superseded_by=? WHERE id=?", (nid, fid))
@@ -899,17 +965,17 @@ class Store:
             return {"id": nid, "status": "superseded", "superseded_id": fid}
         try:
             cur = self.conn.execute(
-                "INSERT INTO um_facts(owner, category, name, body, importance,"
+                "INSERT INTO um_facts(owner, bank, category, name, body, importance,"
                 " created_at, updated_at, valid_until, superseded_by)"
-                " VALUES(?,?,?,?,?,?,?,0,0)",
-                (owner, category, name, body, importance, now, now))
+                " VALUES(?,?,?,?,?,?,?,?,0,0)",
+                (owner, bank, category, name, body, importance, now, now))
         except sqlite3.IntegrityError:
             # backstop: слот занят вне этого процесса — перечитать и свести
             self._abort()
             if _depth >= 1:
                 raise
             return self._upsert_fact(category, name, body, importance, owner,
-                                     _depth + 1, _commit=_commit)
+                                     _depth + 1, _commit=_commit, bank=bank)
         fid = cur.lastrowid
         self._fts_index("um_facts", fid, f"{name} {body}")
         self._commit_if(_commit)
@@ -926,12 +992,13 @@ class Store:
         body/importance. Новое тело = новая версия (supersede), id меняется.
         """
         row = self.conn.execute(
-            "SELECT owner, category, name, body, importance, valid_until"
+            "SELECT owner, bank, category, name, body, importance, valid_until"
             " FROM um_facts WHERE id=?", (fid,)).fetchone()
         if not row:
             return None
-        r_owner, cat, name, cur_body, cur_imp, cur_vu = row
+        r_owner, r_bank, cat, name, cur_body, cur_imp, cur_vu = row
         r_owner = r_owner or ""
+        r_bank = r_bank or ""
         if owner and r_owner != owner:
             return None
         reopened = False
@@ -939,8 +1006,9 @@ class Store:
             vu = float(valid_until)
             if vu == 0:
                 other = self.conn.execute(
-                    "SELECT id FROM um_facts WHERE owner=? AND category=? AND name=?"
-                    " AND valid_until=0 AND id<>?", (r_owner, cat, name, fid)).fetchone()
+                    "SELECT id FROM um_facts WHERE owner=? AND bank=? AND category=?"
+                    " AND name=? AND valid_until=0 AND id<>?",
+                    (r_owner, r_bank, cat, name, fid)).fetchone()
                 if other:
                     raise ValueError(
                         f"slot already has a live version (id={other[0]});"
@@ -980,7 +1048,7 @@ class Store:
             return self._upsert_fact(
                 cat, name, body,
                 importance if importance is not None else cur_imp, r_owner,
-                _commit=_commit)
+                _commit=_commit, bank=r_bank)
         if importance is not None and abs(importance - cur_imp) > 1e-9:
             self.conn.execute(
                 "UPDATE um_facts SET importance=?, updated_at=? WHERE id=?",
@@ -1044,12 +1112,13 @@ class Store:
         CREATE UNIQUE INDEX упал бы на БД с дублями (IntegrityError).
         """
         rows = self.conn.execute(
-            "SELECT owner, category, name, id FROM um_facts WHERE valid_until=0"
-            " ORDER BY owner, category, name, id").fetchall()
+            "SELECT owner, bank, category, name, id FROM um_facts"
+            " WHERE valid_until=0"
+            " ORDER BY owner, bank, category, name, id").fetchall()
         keeper: dict[tuple, int] = {}
         doomed: list[tuple[int, int]] = []
-        for owner, cat, name, fid in rows:
-            key = (owner, cat, name)
+        for owner, bank, cat, name, fid in rows:
+            key = (owner, bank or "", cat, name)
             prev = keeper.get(key)
             if prev is not None:
                 doomed.append((prev, fid))  # prev старше -> superseded новым
@@ -1571,7 +1640,12 @@ class Store:
         if owner_table not in ("um_messages", "um_summaries", "um_facts", "um_edges"):
             return None
         ref = (owner_table, owner_id)
-        if owner and self.owners_for([ref]).get(ref, "") != owner:
+        if owner_table == "um_facts":
+            # P2.7: видимость покрывает owner-check (своя/грант/legacy).
+            if owner and not self.bank_visible(
+                    owner_table, owner_id, owner):
+                return None
+        elif owner and self.owners_for([ref]).get(ref, "") != owner:
             return None
         body, session_id = self._body_of(owner_table, owner_id)
         if body is None:
@@ -2266,7 +2340,7 @@ class Store:
                          _commit: bool = True) -> int:
         """P2.4: новая задача. Живой слот с тем же именем — отказ (не дубль)."""
         live = self.conn.execute(
-            "SELECT id FROM um_facts WHERE owner=? AND category=?"
+            "SELECT id FROM um_facts WHERE owner=? AND bank='' AND category=?"
             " AND name=? AND valid_until=0",
             (owner, TASK_CATEGORY, name)).fetchone()
         if live:
@@ -2352,6 +2426,103 @@ class Store:
             (PERSONA_CATEGORY, owner, max(1, int(limit)))
             if owner else (PERSONA_CATEGORY, max(1, int(limit))))
         return {name: body for name, body in rows}
+
+    @_locked
+    def bank_visible(self, owner_table: str, owner_id: int,
+                     requester: str = "") -> bool:
+        """P2.7: виден ли факт запросчику. Не-факты — всегда True.
+
+        Legacy '' видит всё; своя строка — любая; чужая — только с грантом
+        на (bank_owner, bank). Дефолтный банк чужого — никогда.
+        """
+        if owner_table != "um_facts":
+            return True
+        if not requester:
+            return True
+        row = self.conn.execute(
+            "SELECT owner, bank FROM um_facts WHERE id=?",
+            (int(owner_id),)).fetchone()
+        if row is None:
+            return False
+        row_owner, bank = (row[0] or ""), (row[1] or "")
+        if row_owner == requester:
+            return True
+        if not bank:
+            return False
+        grant = self.conn.execute(
+            "SELECT 1 FROM um_grants WHERE bank_owner=? AND bank=?"
+            " AND grantee=?", (row_owner, bank, requester)).fetchone()
+        return grant is not None
+
+    @_locked
+    def visible_fact_ids(self, ids: list[int], requester: str = "") -> set[int]:
+        """P2.7: batch-видимость фактов для recall-фильтра."""
+        ids = [int(i) for i in ids]
+        if not ids:
+            return set()
+        if not requester:
+            return set(ids)
+        ph = ",".join("?" * len(ids))
+        rows = self.conn.execute(
+            f"SELECT id, owner, bank FROM um_facts WHERE id IN ({ph})",
+            ids).fetchall()
+        grants = {(b_owner, b) for b_owner, b in self.conn.execute(
+            "SELECT bank_owner, bank FROM um_grants WHERE grantee=?",
+            (requester,))}
+        return {fid for fid, r_owner, bank in rows
+                if (r_owner or "") == requester
+                or ((r_owner or "", bank or "") in grants and bank)}
+
+    @_locked
+    def share_bank(self, bank_owner: str, bank: str, grantee: str,
+                   _commit: bool = True) -> dict:
+        """P2.7: read-only грант на банк. Повтор — no-op с тем же id."""
+        bank = _check_bank(bank)
+        if not bank:
+            raise ValueError("default bank is private and cannot be shared")
+        grantee = (grantee or "").strip()
+        if not grantee:
+            raise ValueError("grantee is required")
+        if grantee == (bank_owner or ""):
+            raise ValueError("cannot share a bank with yourself")
+        ex = self.conn.execute(
+            "SELECT id FROM um_grants WHERE bank_owner=? AND bank=?"
+            " AND grantee=?", (bank_owner, bank, grantee)).fetchone()
+        if ex:
+            return {"id": ex[0], "granted": False}
+        import time as _t
+        cur = self.conn.execute(
+            "INSERT INTO um_grants(bank_owner, bank, grantee, created_at)"
+            " VALUES(?,?,?,?)", (bank_owner, bank, grantee, _t.time()))
+        self._commit_if(_commit)
+        return {"id": cur.lastrowid, "granted": True}
+
+    @_locked
+    def unshare_bank(self, bank_owner: str, bank: str, grantee: str,
+                     _commit: bool = True) -> dict:
+        """P2.7: отзыв гранта."""
+        bank = _check_bank(bank)
+        cur = self.conn.execute(
+            "DELETE FROM um_grants WHERE bank_owner=? AND bank=?"
+            " AND grantee=?", (bank_owner, bank, grantee or ""))
+        self._commit_if(_commit)
+        return {"revoked": cur.rowcount > 0}
+
+    @_locked
+    def has_grants(self, grantee: str) -> bool:
+        """P2.7: есть ли входящие гранты (переключатель broaden в recall)."""
+        if not grantee:
+            return False
+        return self.conn.execute(
+            "SELECT 1 FROM um_grants WHERE grantee=? LIMIT 1",
+            (grantee,)).fetchone() is not None
+
+    @_locked
+    def fact_bank(self, fid: int) -> str | None:
+        """P2.7: банк факта (None = нет строки). Для точных rejection-кодов."""
+        row = self.conn.execute(
+            "SELECT bank FROM um_facts WHERE id=?", (int(fid),)).fetchone()
+        return (row[0] or "") if row else None
 
     @_locked
     def node_ok(self, table: str, oid: int, owner: str = "",

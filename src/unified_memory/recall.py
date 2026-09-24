@@ -69,6 +69,10 @@ class Router:
         if source and scope == "facts":
             return []
         self.store.expire_working_facts(owner=owner)
+        # P2.7: держатель грантов ищет шире (плечи без owner-фильтра),
+        # выход — строгий пост-фильтр ниже. Без грантов поведение прежнее.
+        broad = bool(owner) and self.store.has_grants(owner)
+        arm_owner = "" if broad else owner
         self.last_stats = {
             "dim_skipped": 0,
             "importance": {
@@ -83,7 +87,7 @@ class Router:
         timing: dict = {}
         t0 = time.perf_counter() if diagnostics else 0.0
         fts_hits = self.store.fts_search(query, scope=scope, session_id=session_id,
-                                         limit=limit * 2, owner=owner,
+                                         limit=limit * 2, owner=arm_owner,
                                          include_expired=include_expired, as_of=as_of,
                                          source=source)
         if fts_hits:
@@ -94,7 +98,7 @@ class Router:
         archive_hits: list[Hit] = []
         if include_archived:
             archive_hits = self._archive_hits(
-                query, scope, session_id, limit, owner, source)
+                query, scope, session_id, limit, arm_owner, source)
             if archive_hits:
                 lists.append(archive_hits)
             if diagnostics:
@@ -112,7 +116,7 @@ class Router:
             cand = []
             self.last_stats["vec_index"] = "brute"
             if self.cfg.vec_index != "off":
-                knn_rows = self.store.knn(qv, tables, owner, limit * 2)
+                knn_rows = self.store.knn(qv, tables, arm_owner, limit * 2)
                 if knn_rows:
                     vecs = self.store.vectors_for(
                         [(ot, oid) for ot, oid, _ in knn_rows])
@@ -122,7 +126,7 @@ class Router:
                         self.last_stats["vec_index"] = "knn"
             if not cand:
                 # Batch: все вектора одним проходом (фолбэк без индекса).
-                all_vecs = self.store.all_vectors(tables, owner)
+                all_vecs = self.store.all_vectors(tables, arm_owner)
                 cand = [(ot, oid, vec) for ot, oid, vec in all_vecs
                         if len(vec) == len(qv)]
                 self.last_stats["dim_skipped"] = len(all_vecs) - len(cand)
@@ -172,10 +176,10 @@ class Router:
             seeds = [(h.owner_table, h.owner_id) for lst in lists for h in lst
                      if not h.archived]
             graph_hits = self._graph_bfs(query, scope, session_id, limit * 2,
-                                         owner, include_expired, as_of, hops,
+                                         arm_owner, include_expired, as_of, hops,
                                          rel, seeds)
         else:
-            graph_hits = self._graph_arm(query, scope, session_id, limit * 2, owner,
+            graph_hits = self._graph_arm(query, scope, session_id, limit * 2, arm_owner,
                                          include_expired, as_of)
         if graph_hits:
             lists.append(graph_hits)
@@ -220,6 +224,25 @@ class Router:
         adjusted.sort(key=lambda h: -h.score)
         self.last_stats["reranked"] = len(adjusted)
         final = self._mmr(adjusted, limit)
+        if owner:
+            # P2.7: банки на границе чтения. Лимит считается до фильтра
+            # (under-fill возможен); утечки тел нет ни из одного плеча.
+            # Без грантов плечи уже owner-scoped — проверяем только факты;
+            # с грантами плечи расширены — проверяем все таблицы строго.
+            fact_ids = [h.owner_id for h in final
+                        if h.owner_table == "um_facts"]
+            vis = (self.store.visible_fact_ids(fact_ids, owner)
+                   if fact_ids else set())
+            if broad:
+                own = self.store.owners_for(
+                    [(h.owner_table, h.owner_id) for h in final])
+                final = [h for h in final
+                         if own.get((h.owner_table, h.owner_id), "") == owner
+                         or (h.owner_table == "um_facts"
+                             and h.owner_id in vis)]
+            elif fact_ids:
+                final = [h for h in final if h.owner_table != "um_facts"
+                         or h.owner_id in vis]
         if diagnostics:
             keys = {(h.owner_table, h.owner_id) for h in final}
             arms = {"fts": fts_hits, "vectors": vec_hits,

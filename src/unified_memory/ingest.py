@@ -72,26 +72,31 @@ class Ingest:
                       importance: float = 0.5, subject: str = "",
                       predicate: str = "", obj: str = "",
                       session_id: str = "", owner: str = "",
-                      _commit: bool = True, ttl_s: int | None = None) -> int:
+                      _commit: bool = True, ttl_s: int | None = None,
+                      bank: str = "") -> int:
         """Слот-запись факта. Возвращает id живого факта (совместимость)."""
         return self.upsert_fact(category, name, body, importance, subject,
                                 predicate, obj, session_id, owner,
-                                _commit=_commit, ttl_s=ttl_s)["id"]
+                                _commit=_commit, ttl_s=ttl_s,
+                                bank=bank)["id"]
 
     def upsert_fact(self, category: str, name: str, body: str,
                     importance: float = 0.5, subject: str = "",
                     predicate: str = "", obj: str = "",
                     session_id: str = "", owner: str = "",
-                    _commit: bool = True, ttl_s: int | None = None) -> dict:
+                    _commit: bool = True, ttl_s: int | None = None,
+                    bank: str = "") -> dict:
         """Слот-запись + вектора/рёбра. Возвращает {id, status, superseded_id}.
 
         status: created | superseded (новое тело) | noop (то же тело) |
         updated (только importance). Вектора/рёбра плодим лишь при created/
         superseded — при noop/updated они уже на том же id.
         """
+        from .store import _check_bank
         category, name, body = (self._clean(value) for value in
                                 (category, name, body))
         subject, predicate, obj = (self._clean(s) for s in (subject, predicate, obj))
+        bank = _check_bank(self._clean(bank or ""))
         if ttl_s is None:
             ttl_s = self.cfg.working_ttl_s
         try:
@@ -105,19 +110,19 @@ class Ingest:
             with self.store.transaction():
                 out = self._upsert_fact_write(
                     category, name, body, importance, subject, predicate, obj,
-                    session_id, owner, valid_until)
+                    session_id, owner, valid_until, bank)
         else:
             out = self._upsert_fact_write(
                 category, name, body, importance, subject, predicate, obj,
-                session_id, owner, valid_until)
+                session_id, owner, valid_until, bank)
         return out
 
     def _upsert_fact_write(self, category: str, name: str, body: str,
                            importance: float, subject: str, predicate: str,
                            obj: str, session_id: str, owner: str,
-                           valid_until: float = 0.0) -> dict:
+                           valid_until: float = 0.0, bank: str = "") -> dict:
         out = self.store.add_fact_ex(category, name, body, importance, owner,
-                                     _commit=False)
+                                     _commit=False, bank=bank)
         fid = out["id"]
         if valid_until > 0:
             # A future deadline is metadata for the fact lifecycle, not an
@@ -309,7 +314,8 @@ class Ingest:
                 self._clean(str(op.get("predicate", ""))),
                 self._clean(str(op.get("object", ""))),
                 str(op.get("session_id", "")), owner, _commit=False,
-                ttl_s=op.get("ttl_s"))
+                ttl_s=op.get("ttl_s"),
+                bank=self._clean(str(op.get("bank", ""))))
             return {"index": i, "op": kind, "status": out["status"],
                     "id": out["id"], "superseded_id": out["superseded_id"]}, None
         if kind == "update":

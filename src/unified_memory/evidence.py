@@ -143,7 +143,19 @@ def _resolve(store, refs, owner, max_refs, max_chars, archived_fetch):
     bodies = store.bodies_for(parsed)
     owners = store.owners_for(parsed) if owner else {}
     for key in parsed:
-        if owner and owners.get(key, "") != owner:
+        if key[0] == "um_facts":
+            # P2.7: чужой дефолт/несуществующий — legacy owner_mismatch;
+            # чужой именованный без гранта — bank_hidden.
+            bank = store.fact_bank(key[1])
+            if owner and owners.get(key, "") != owner and not bank:
+                rejections.append({"kind": key[0], "id": key[1],
+                                   "reason_code": "owner_mismatch"})
+                continue
+            if bank and not store.bank_visible(key[0], key[1], owner):
+                rejections.append({"kind": key[0], "id": key[1],
+                                   "reason_code": "bank_hidden"})
+                continue
+        elif owner and owners.get(key, "") != owner:
             rejections.append({"kind": key[0], "id": key[1],
                                "reason_code": "owner_mismatch"})
             continue

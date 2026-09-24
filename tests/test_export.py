@@ -9,7 +9,7 @@ from unified_memory.export import COMPLETE_FORMAT, export_store
 
 CONTENT = {"um_messages", "um_summaries", "um_summary_sources", "um_facts",
            "um_entities", "um_edges", "um_links", "um_annotations",
-           "um_vectors", "um_meta"}
+           "um_grants", "um_vectors", "um_meta"}
 
 
 @pytest.fixture

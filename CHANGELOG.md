@@ -27,6 +27,9 @@
   `not_in_scope`.
 - P2.6: `mem_extract` endpoint preview of triples for one ref (strict JSON,
   caps, no writes); reuses `UM_SUMMARIZER_*`, explicit error without endpoint.
+- P2.7: bank sharing over facts (`bank` scope + `um_grants` read-only grants,
+  `mem_bank_share/unshare`); visibility enforced on recall/get/expand/evidence
+  boundaries; legacy semantics preserved.
 - Migration metadata columns for source references, confidence, veracity, and
   tool metadata; export/import and `mem_get` preserve them.
 

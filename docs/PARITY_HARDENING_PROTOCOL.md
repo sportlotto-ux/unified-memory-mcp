@@ -711,6 +711,67 @@ read-only (счётчики строк стора бит-в-бит).
 **Validation:** полный suite на Python 3.14 и 3.12, `git diff --check`, wheel
 build/install/import smoke из clean venv.
 
+## 5.7 P2.7 — Banks/shared (вариант A: скоуп + гранты, только факты)
+
+**Use case:** владелец кладёт факты в именованный банк (`family`, `project-x`)
+и открывает чтение конкретному лицу грантом. Без гранта чужой банк невидим;
+дефолт (`bank=""`) — прежняя owner-изоляция без изменений.
+
+**Проблема:** изоляция только по `owner`: либо всё твоё видно тебе одному,
+либо legacy `""` видит всё. Выборочного шаринга нет.
+
+**Пользовательский эффект:** `mem_fact(..., bank="family")` пишет в свой
+банк; `mem_bank_share(bank, grantee, owner)` открывает чтение;
+`mem_bank_unshare` закрывает. Гость видит расшаренное через `mem_get`/
+`mem_recall`/`mem_evidence`/`mem_expand`; остальное для него `found: false`.
+
+**Scope:**
+
+- `um_facts.bank TEXT NOT NULL DEFAULT ''` (+миграция старых БД) и
+  `um_grants(bank_owner, bank, grantee)` с dedupe;
+- живой слот — `(owner, bank, category, name)` (индекс пересоздаётся
+  миграцией; старые БД без дублей — безопасно);
+- имя банка `^[A-Za-z0-9_-]{1,64}$`; дефолтный банк расшарить нельзя;
+  фантомные банки (грант до записи) разрешены;
+- видимость: legacy `""` видит всё; иначе своя строка любая
+  + чужая только с грантом; гранты read-only (запись — только своя);
+- enforcement на границах тел: `ref_details`, `mem_expand`, финальный
+  фильтр `Router.recall`, `bank_hidden`-rejection в `_resolve`
+  (накрывает cite/compute/conflicts/validate/extract разом);
+- `mem_fact` + batch `remember_fact` принимают `bank`.
+
+**Non-goals:**
+
+- банки для messages/summaries/edges (только факты);
+- id-видимость концов в `graph_query` (тел нет — только ids, документировано);
+- recall `limit` считается до visibility-фильтра (under-fill возможен);
+- кросс-банковые листинги задач/персоны (листы — «моё», гранты их не расширяют);
+- листинг выданных грантов; recall-diagnostics до фильтра;
+- смена `working_memory → skip` и upstream bank mapping (P1.6 без изменений).
+
+**Красные тесты** (`tests/test_banks.py`, 8 шт.): запись/изоляция/legacy,
+share→виден→unshare→скрыт, rejects (имя/себя/пустого/дефолт),
+recall no-leak, слоты независимы по банкам, evidence/expand gate,
+export/import несёт bank+grants, миграция старой схемы.
+
+**Acceptance criteria:**
+
+- ни один путь чтения тел не отдаёт чужой банк без гранта
+  (recall/get/expand/evidence ×3/validate/extract);
+- грант не даёт записи (чужой `mem_update`/`mem_task` — отказ как раньше);
+- legacy `owner=""` видит всё включая банки;
+- старая БД открывается, индекс пересоздан, данные целы.
+
+**Rollback/failure behavior:** невалидный банк/грант — отказ до записи;
+миграция индекса — после dedupe-проверки; всё писательское —
+в `Store.transaction()`.
+
+**Docs/config impact:** `README.md` (26 тулов), `CHANGELOG.md`, status log;
+новых `UM_*` нет; `IMPORT.md` — grants импортируются verbatim.
+
+**Validation:** полный suite на Python 3.14 и 3.12, `git diff --check`, wheel
+build/install/import smoke из clean venv.
+
 ## 6. Story template
 
 Каждая story должна иметь этот блок до начала кода:
@@ -760,6 +821,7 @@ Validation:
 | P2.4 tasks | done (uncommitted) | — | mem_task over category="task" slots, status machine in metadata_json, supersede carry-over, no new tables, recall invariant; full suite 394/4 (3.14), wheel smoke OK |
 | P2.5 persona | done (uncommitted) | — | mem_persona set/get over category="persona" slots, bounded ordered profile, no new tables, upstream persona stays not_in_scope; full suite 400/4 (3.14), wheel smoke OK |
 | P2.6 extract | done (uncommitted) | — | EndpointExtractor + mem_extract preview-only (strict JSON, caps, no writes), reuse UM_SUMMARIZER_*, loud errors, no new tables/config; full suite 406/4 (3.14), wheel smoke OK |
+| P2.7 banks | done (uncommitted) | — | um_facts.bank + um_grants read-only sharing, visibility on recall/get/expand/evidence, slot+index migration, legacy preserved; full suite 414/4 (3.14), wheel smoke OK |
 
 ## 9. Final gate
 

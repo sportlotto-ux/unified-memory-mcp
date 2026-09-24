@@ -42,7 +42,7 @@ SUPPORTED = ("1",)
 # Вставляемые таблицы в порядке зависимостей.
 IMPORT_TABLES = ("um_entities", "um_facts", "um_messages", "um_summaries",
                  "um_summary_sources", "um_edges", "um_links", "um_annotations",
-                 "um_vectors")
+                 "um_grants", "um_vectors")
 # um_meta читаем (schema_version), um_fts/um_vecidx — производные (legacy-дампы
 # их содержат), при импорте игнорируются: FTS пересобирается, vecidx — reindex.
 IGNORED = ("um_meta", "um_fts", "um_vecidx")
@@ -160,22 +160,29 @@ def _entities(store, rows, owner, rep):
 
 
 def _facts(store, rows, owner, rep):
+    from .store import _check_bank
     m: dict[int, int] = {}
     for r in rows:
         own = _own(owner, r)
+        try:
+            bank = _check_bank(r.get("bank") or "")
+        except ValueError:
+            rep["um_facts"]["skipped"] += 1
+            continue
         vu = float(r.get("valid_until") or 0.0)
         if vu == 0:  # слот занят живой версией → skip (lossless-safe)
             ex = store.conn.execute(
-                "SELECT id FROM um_facts WHERE owner=? AND category=? AND name=?"
-                " AND valid_until=0", (own, r["category"], r["name"])).fetchone()
+                "SELECT id FROM um_facts WHERE owner=? AND bank=? AND category=?"
+                " AND name=? AND valid_until=0",
+                (own, bank, r["category"], r["name"])).fetchone()
             if ex:
                 rep["um_facts"]["skipped"] += 1
                 continue
         cur = store.conn.execute(
-            "INSERT INTO um_facts(owner, category, name, body, importance,"
+            "INSERT INTO um_facts(owner, bank, category, name, body, importance,"
             " created_at, updated_at, valid_until, superseded_by, metadata_json,"
-            " confidence, veracity, source_ref) VALUES(?,?,?,?,?,?,?,?,0,?,?,?,?)",
-            (own, r["category"], r["name"], r.get("body", ""),
+            " confidence, veracity, source_ref) VALUES(?,?,?,?,?,?,?,?,?,0,?,?,?,?)",
+            (own, bank, r["category"], r["name"], r.get("body", ""),
              float(r.get("importance") or 0.5),
              float(r.get("created_at") or 0.0),
              float(r.get("updated_at") or 0.0), vu,
@@ -327,6 +334,33 @@ def _annotations(store, rows, maps, owner, rep):
         rep["um_annotations"]["inserted"] += 1
 
 
+def _grants(store, rows, rep):
+    """P2.7: гранты — verbatim (ссылки текстовые, remap не нужен), dedupe."""
+    from .store import _check_bank
+    for r in rows:
+        try:
+            bank_owner, bank, grantee = (r.get("bank_owner") or "",
+                                        _check_bank(r.get("bank") or ""),
+                                        (r.get("grantee") or "").strip())
+        except ValueError:
+            rep["um_grants"]["skipped"] += 1
+            continue
+        if not bank or not grantee or grantee == bank_owner:
+            rep["um_grants"]["skipped"] += 1
+            continue
+        ex = store.conn.execute(
+            "SELECT id FROM um_grants WHERE bank_owner=? AND bank=?"
+            " AND grantee=?", (bank_owner, bank, grantee)).fetchone()
+        if ex:
+            rep["um_grants"]["skipped"] += 1
+            continue
+        store.conn.execute(
+            "INSERT INTO um_grants(bank_owner, bank, grantee, created_at)"
+            " VALUES(?,?,?,?)",
+            (bank_owner, bank, grantee, float(r.get("created_at") or 0.0)))
+        rep["um_grants"]["inserted"] += 1
+
+
 def _vectors(store, rows, maps, owner, rep, target_dim):
     for r in rows:
         ot = r["owner_table"]
@@ -370,6 +404,7 @@ def import_dump(store: Store, path: str | Path, owner: str | None = None,
                 "um_summaries": smap, "um_edges": edgemap}
         _links(store, tables.get("um_links", []), maps, owner, rep)
         _annotations(store, tables.get("um_annotations", []), maps, owner, rep)
+        _grants(store, tables.get("um_grants", []), rep)
         _vectors(store, vec_rows, maps, owner, rep, target_dim)
         # Imported rows bypass Store write helpers; invalidate all derived
         # pressure state so the next read rebuilds it from durable rows.
