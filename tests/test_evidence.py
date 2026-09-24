@@ -169,6 +169,18 @@ def test_compute_pattern(store):
     assert out["result"] == 1500.0
 
 
+def test_compute_pattern_length_is_capped(store):
+    with pytest.raises(ValueError, match="pattern.*256"):
+        run_compute(store, [], op="sum", pattern="a" * 257)
+
+
+def test_compute_pattern_timeout_is_loud(store):
+    a = store.add_message("s", "user", "a" * 8000 + "!")
+    with pytest.raises(ValueError, match="pattern.*timeout"):
+        run_compute(store, [f"message:{a}"], op="sum", pattern=r"(a+)+$",
+                    max_chars=8001)
+
+
 def test_compute_no_numbers_unsupported(store):
     a = store.add_fact("m", "a", "никаких цифр")
     out = run_compute(store, [f"fact:{a}"], op="sum")

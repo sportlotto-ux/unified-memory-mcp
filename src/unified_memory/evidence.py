@@ -12,6 +12,8 @@ from __future__ import annotations
 import re
 from typing import Callable
 
+import regex
+
 # kind из mem_recall (um_*) и короткие алиасы
 KINDS = {
     "fact": "um_facts", "um_facts": "um_facts",
@@ -23,6 +25,8 @@ KINDS = {
 _NUM = re.compile(r"-?\d[\d\u00a0 ]*(?:[.,]\d+)?")
 _WORD = re.compile(r"[0-9a-zа-яё]+")
 _OPS = ("count", "sum", "min", "max", "avg", "median")
+_PATTERN_MAX_CHARS = 256
+_PATTERN_TIMEOUT_SECONDS = 0.05
 
 
 def parse_ref(ref: str) -> tuple[str, int]:
@@ -96,9 +100,14 @@ def parse_number(raw: str) -> float | None:
         return None
 
 
-def _numbers(text: str, rx: re.Pattern | None) -> list[float]:
+def _numbers(text: str, rx: re.Pattern | regex.Pattern | None) -> list[float]:
     if rx is not None:
-        raw = [m.group(1) if m.groups() else m.group(0) for m in rx.finditer(text)]
+        try:
+            raw = [m.group(1) if m.groups() else m.group(0)
+                   for m in rx.finditer(text, timeout=_PATTERN_TIMEOUT_SECONDS)]
+        except TimeoutError as e:
+            raise ValueError(
+                "pattern exceeded execution timeout") from e
     else:
         raw = _NUM.findall(text)
     out = []
@@ -244,9 +253,12 @@ def run_compute(store, refs: list[str], op: str = "count", pattern: str = "",
         raise ValueError(f"unknown op {op!r}: {list(_OPS)}")
     rx = None
     if pattern:
+        if len(pattern) > _PATTERN_MAX_CHARS:
+            raise ValueError(
+                f"pattern exceeds {_PATTERN_MAX_CHARS} characters")
         try:
-            rx = re.compile(pattern)
-        except re.error as e:
+            rx = regex.compile(pattern)
+        except regex.error as e:
             raise ValueError(f"bad pattern {pattern!r}: {e}")
     rows, rejections = _resolve(store, refs, owner, max_refs, max_chars,
                                 archived_fetch)
