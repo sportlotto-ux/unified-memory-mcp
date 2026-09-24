@@ -101,19 +101,23 @@ class ActiveWindow:
             except Exception as e:  # noqa: BLE001 — сжатие не роняет запись
                 return {"status": "degraded", **base,
                         "error": f"{type(e).__name__}: {e}"[:200]}
-            sid = self.store.add_summary(session_id, body, depth=0,
-                                         covers_from=head[0]["id"],
-                                         covers_to=head[-1]["id"], owner=owner)
-            self.store.meta_set(fkey, str(head[-1]["id"]))
-            report["leaf_summary"] = sid
-            report["covered"] = len(head)
-        else:
-            report["status"] = "noop"
-        report["condensed"] = self.condense(session_id, owner=owner)
+        with self.store.transaction():
+            if head:
+                sid = self.store.add_summary(
+                    session_id, body, depth=0,
+                    covers_from=head[0]["id"], covers_to=head[-1]["id"],
+                    owner=owner, _commit=False)
+                self.store.meta_set(fkey, str(head[-1]["id"]), _commit=False)
+                report["leaf_summary"] = sid
+                report["covered"] = len(head)
+            else:
+                report["status"] = "noop"
+            report["condensed"] = self.condense(
+                session_id, owner=owner, _commit=False)
         return report
 
     def condense(self, session_id: str, max_passes: int = 10,
-                 owner: str = "") -> list[dict]:
+                 owner: str = "", _commit: bool = True) -> list[dict]:
         """Схлопнуть каждые `fanin` живых нод уровня d в одну ноду d+1.
 
         Дети помечаются superseded_by (давление и сборка их пропускают,
@@ -121,6 +125,13 @@ class ActiveWindow:
         """
         if self.summarizer is None:
             return []
+        if _commit:
+            with self.store.transaction():
+                return self._condense(session_id, max_passes, owner)
+        return self._condense(session_id, max_passes, owner)
+
+    def _condense(self, session_id: str, max_passes: int,
+                  owner: str) -> list[dict]:
         oc = " AND owner=?" if owner else ""
         op = (owner,) if owner else ()
         out: list[dict] = []
@@ -143,14 +154,16 @@ class ActiveWindow:
             sid = self.store.add_summary(
                 session_id, body, depth=depth + 1,
                 covers_from=min(covers) if covers else None,
-                covers_to=max(covers) if covers else None, owner=owner)
+                covers_to=max(covers) if covers else None, owner=owner,
+                _commit=False)
             self.store.execute_write(
                 f"UPDATE um_summaries SET superseded_by={int(sid)}"
                 f" WHERE id IN ({','.join('?' * len(kids))})",
-                tuple(k[0] for k in kids))
+                tuple(k[0] for k in kids), _commit=False)
             # Счётчик честный: дети больше не в активном окне — вычитаем их тела.
             self.store.bump_tokens(
-                session_id, -sum(estimate_tokens(k[1]) for k in kids), owner)
+                session_id, -sum(estimate_tokens(k[1]) for k in kids), owner,
+                _commit=False)
             out.append({"from_depth": depth, "to_depth": depth + 1,
                         "summary_id": sid, "children": len(kids)})
         return out

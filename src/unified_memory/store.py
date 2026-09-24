@@ -562,10 +562,11 @@ class Store:
         return self.conn.execute(sql, params).fetchall()
 
     @_locked
-    def execute_write(self, sql: str, params: tuple = ()) -> int:
+    def execute_write(self, sql: str, params: tuple = (),
+                      _commit: bool = True) -> int:
         """#6: запись из движка только через лок. Возвращает rowcount."""
         cur = self.conn.execute(sql, params)
-        self.conn.commit()
+        self._commit_if(_commit)
         return cur.rowcount
 
     # -- транзакционное ядро (v0.7-п.5) -----------------------------------
@@ -647,11 +648,11 @@ class Store:
         self._commit_if(_commit)
 
     @_locked
-    def meta_set(self, key: str, value: str) -> None:
+    def meta_set(self, key: str, value: str, _commit: bool = True) -> None:
         self.conn.execute(
             "INSERT INTO um_meta(key, value) VALUES(?,?)"
             " ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
-        self.conn.commit()
+        self._commit_if(_commit)
 
     # -- writes -----------------------------------------------------------
     @_locked
@@ -928,7 +929,7 @@ class Store:
     @_locked
     def add_summary(self, session_id: str, body: str, depth: int = 0,
                     covers_from: int | None = None, covers_to: int | None = None,
-                    owner: str = "") -> int:
+                    owner: str = "", _commit: bool = True) -> int:
         cur = self.conn.execute(
             "INSERT INTO um_summaries(session_id, owner, depth, body, covers_from, covers_to, created_at)"
             " VALUES(?,?,?,?,?,?,?)",
@@ -936,8 +937,8 @@ class Store:
         )
         sid = cur.lastrowid
         self._fts_index("um_summaries", sid, body)
-        self.bump_tokens(session_id, estimate_tokens(body), owner)
-        self.conn.commit()
+        self.bump_tokens(session_id, estimate_tokens(body), owner, _commit=False)
+        self._commit_if(_commit)
         return sid
 
     @_locked
