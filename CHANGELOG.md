@@ -7,8 +7,9 @@
 ### Added
 - P1.1–P1.5 parity additions: metadata inspection, lineage, archive recall,
   bounded importance ranking, and `mem_graph_query`.
-- P1.6a: read-only LCM migration adapter with dry-run reconciliation, atomic
-  apply, source ordering/provenance metadata, and explicit summary policy.
+- P1.6: read-only LCM and Mnemosyne migration adapters with dry-run
+  reconciliation, atomic apply, source ordering/provenance metadata, owner/bank
+  mapping, and explicit memory/summary policies.
 - Migration metadata columns for source references, confidence, veracity, and
   tool metadata; export/import and `mem_get` preserve them.
 

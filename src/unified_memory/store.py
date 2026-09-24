@@ -96,6 +96,7 @@ CREATE TABLE IF NOT EXISTS um_facts (
     metadata_json TEXT NOT NULL DEFAULT '',
     confidence REAL NOT NULL DEFAULT 1.0,
     veracity TEXT NOT NULL DEFAULT '',
+    source_ref TEXT NOT NULL DEFAULT '',
     -- Слот-семантика (v0.5): 0 = живое (sentinel!), иначе timestamp истечения.
     -- NOT NULL обязателен: NULL-строки выпали бы из WHERE valid_until=0
     -- и обошли бы partial unique index ниже.
@@ -136,7 +137,8 @@ CREATE TABLE IF NOT EXISTS um_edges (
     valid_until REAL NOT NULL DEFAULT 0,  -- 0 = живое; замена ребра = новое ребро
     metadata_json TEXT NOT NULL DEFAULT '',
     confidence REAL NOT NULL DEFAULT 1.0,
-    veracity TEXT NOT NULL DEFAULT ''
+    veracity TEXT NOT NULL DEFAULT '',
+    source_ref TEXT NOT NULL DEFAULT ''
 );
 
 -- ADR-001: типизированные связи памяти (message<->fact, fact<->fact).
@@ -468,11 +470,13 @@ class Store:
                 ("metadata_json", "TEXT NOT NULL DEFAULT ''"),
                 ("confidence", "REAL NOT NULL DEFAULT 1.0"),
                 ("veracity", "TEXT NOT NULL DEFAULT ''"),
+                ("source_ref", "TEXT NOT NULL DEFAULT ''"),
             ),
             "um_edges": (
                 ("metadata_json", "TEXT NOT NULL DEFAULT ''"),
                 ("confidence", "REAL NOT NULL DEFAULT 1.0"),
                 ("veracity", "TEXT NOT NULL DEFAULT ''"),
+                ("source_ref", "TEXT NOT NULL DEFAULT ''"),
             ),
         }
         pending: list[tuple[str, str, str]] = []
@@ -1505,18 +1509,18 @@ class Store:
         elif owner_table == "um_facts":
             row = self.conn.execute(
                 "SELECT owner, category, name, importance, created_at, updated_at,"
-                " valid_until, superseded_by, metadata_json, confidence, veracity"
-                " FROM um_facts WHERE id=?", (owner_id,)
+                " valid_until, superseded_by, metadata_json, confidence, veracity,"
+                " source_ref FROM um_facts WHERE id=?", (owner_id,)
             ).fetchone()
             metadata = dict(zip(
                 ["owner", "category", "name", "importance", "created_at",
                  "updated_at", "valid_until", "superseded_by", "metadata_json",
-                 "confidence", "veracity"], row or ()))
+                 "confidence", "veracity", "source_ref"], row or ()))
         else:
             row = self.conn.execute(
                 """SELECT e.subject_id, e.predicate, e.object_id, e.session_id,
                           e.owner, e.fact_id, e.created_at, e.valid_until,
-                          e.metadata_json, e.confidence, e.veracity,
+                          e.metadata_json, e.confidence, e.veracity, e.source_ref,
                           s.display, o.display
                    FROM um_edges e
                    JOIN um_entities s ON s.id=e.subject_id
@@ -1526,7 +1530,7 @@ class Store:
             metadata = dict(zip(
                 ["subject_id", "predicate", "object_id", "session_id", "owner",
                  "fact_id", "created_at", "valid_until", "metadata_json",
-                 "confidence", "veracity", "subject", "object"],
+                 "confidence", "veracity", "source_ref", "subject", "object"],
                 row or ()))
         vector = {"present": False}
         vrow = self.conn.execute(

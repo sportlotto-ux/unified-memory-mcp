@@ -110,8 +110,27 @@ Raw `messages` переносятся в порядке `store_id`; `conversatio
 и redaction-gated tool metadata сохраняются. LCM `summary_nodes` по умолчанию
 не копируются — summaries пересчитываются Unified. Для явного сохранения source
 summaries добавьте `--summary-strategy preserve --apply`. Отчёт не содержит source
-content или tool payload. Mnemosyne adapter будет отдельным P1.6b; `--format lcm`
-сейчас является единственным поддерживаемым migration format.
+content или tool payload.
+
+Mnemosyne adapter импортирует canonical facts/history, `triples` и `graph_edges`,
+а `working_memory`/`episodic_memory` по умолчанию пропускает:
+
+```bash
+python -m unified_memory.migration \
+  --format mnemosyne --input /path/to/mnemosyne.db \
+  --owner-map '{"bank-a":"tenant-a"}' --default-owner tenant-a
+```
+
+Для явно выбранной message policy:
+
+```bash
+python -m unified_memory.migration \
+  --format mnemosyne --input mnemosyne.db --apply \
+  --working-policy message --episodic-policy message --memory-policy message
+```
+
+Derived/unsupported tables остаются в `skipped_fields`; source content и payloads
+не попадают в отчёт.
 
 ## Как это работает
 
@@ -168,7 +187,7 @@ content или tool payload. Mnemosyne adapter будет отдельным P1.
 Полный список отложенного — `docs/BACKLOG.md`.
 
 - Архив выносит только **сообщения** (текст+вектор) — основной драйвер роста. Истёкшие факты/рёбра и `um_summaries` — TODO (`docs/BACKLOG.md`).
-- Миграция upstream: P1.6a LCM adapter поддерживает dry-run/atomic apply и reconciliation report; Mnemosyne adapter (P1.6b) ещё не реализован и не принимается CLI.
+- Миграция upstream: P1.6 LCM/Mnemosyne adapters поддерживают dry-run/atomic apply и reconciliation report; working/episodic rows по умолчанию пропускаются, derived tables явно перечислены в `skipped_fields`.
 - `mem_doctor(mode=export)` пишет **стриминговый JSONL** (`um-export-jsonl`: header + `{table,row}` построчно; вектора base64, um_fts/um_vecidx исключены). Импорт — `python -m unified_memory.import_dump <file> [--owner] [--dry-run]`, аддитивный (fresh-id remap, слот-конфликт → skip), без backend. **Чтение дампа — целиком в память** (стриминг только на записи).
 - Isolation добровольная: `owner=""` (дефолт) — legacy без фильтра, видит всё; строгая изоляция — только при непустом `owner`. Старые БД мигрируют сами (`owner=''`), сущности пересобираются под `UNIQUE(name, owner)`.
 - Поддерживается MCP Python SDK 2.x (`mcp>=2.0,<3`); MCP 1.x intentionally не входит в dependency contract.
@@ -180,7 +199,7 @@ content или tool payload. Mnemosyne adapter будет отдельным P1.
 ## Разработка
 
 ```bash
-python -m pytest tests/ -q   # текущий dev-прогон: 365 passed, 4 skipped (Python 3.14)
+python -m pytest tests/ -q   # текущий dev-прогон: 369 passed, 4 skipped (Python 3.14)
 ```
 
 Полный suite также прогоняется на Python 3.12; CI дополнительно собирает wheel,

@@ -1,6 +1,6 @@
 # PARITY_HARDENING_PROTOCOL — регламент реализации unified-memory
 
-Статус: **P0.1–P0.4, P1.1–P1.5 реализованы; P1.6a LCM adapter реализован локально, P1.6b Mnemosyne adapter ещё pending; изменения P1.6a не закоммичены**.
+Статус: **P0.1–P0.4, P1.1–P1.6 реализованы; изменения P1.6 не закоммичены**.
 
 Документ фиксирует порядок работ после аудита переноса из `hermes-lcm` и
 `mnemosyne`. Цель — не расширять API поверх известных correctness/lifecycle
@@ -337,11 +337,12 @@ Acceptance migration:
 - no source secrets copied into logs;
 - explicit list of skipped fields.
 
-P1.6a LCM contract: source SQLite открывается только в read-only URI mode; `messages` импортируются
-в порядке `store_id`, `conversation_id`/`source_order`/`tool_*` сохраняются в message metadata,
-`summary_strategy=recompute` по умолчанию, `preserve` требует явного флага, apply выполняется
-в одной транзакции, а отчёт содержит counts/field names/digests, но не source content или tool payload.
-P1.6b (Mnemosyne) остаётся отдельной story и не считается покрытой этим контрактом.
+P1.6 contract: оба source SQLite открываются только в read-only URI mode; apply выполняется
+в одной транзакции, а отчёт содержит counts/field names/digests, но не source content, tool payload
+или credentials. LCM сохраняет source ordering/conversation/tool metadata и по умолчанию
+пересчитывает summaries; preserve требует явного флага. Mnemosyne переносит canonical fact history,
+triples/edges и owner/bank mapping; working/episodic rows требуют явной policy, derived/unmapped
+таблицы перечисляются в skipped report.
 
 ## 5. P2 — только после P1 parity gate
 
@@ -401,7 +402,7 @@ Validation:
 | P1.3 archive recall | done (uncommitted) | — | explicit include_archived bounded lexical scan; owner/session/source/scope filters; no archive creation on read; full suite 351/4 (3.14), 335/7 (3.12); wheel smoke OK |
 | P1.4 importance | done (uncommitted) | — | optional bounded centered multiplier for facts; UM_IMPORTANCE_WEIGHT default 0; diagnostics + eval ranking case; full suite 356/4 (3.14), 340/7 (3.12); wheel smoke OK |
 | P1.5 graph query | done (uncommitted) | — | mem_graph_query with exact edge filters, typed-link rel/min_weight, as_of/liveness, bounded max_hops, owner/session isolation, deterministic edges/links; full suite 360/4 (3.14), 344/7 (3.12); wheel smoke OK |
-| P1.6 migration | in progress | — | P1.6a LCM read-only SQLite snapshot adapter: dry-run default, atomic apply, source ordering/conversation/tool metadata, recompute summaries by default, explicit preserve, reconciliation + recall checks; full suite 365/4 (3.14), 349/7 (3.12), wheel smoke OK; P1.6b Mnemosyne pending |
+| P1.6 migration | done (uncommitted) | — | LCM + Mnemosyne read-only SQLite adapters: dry-run default, atomic apply, reconciliation + recall checks, LCM source ordering/tool metadata, Mnemosyne fact history/graph/owner mapping, explicit working/episodic policies, skipped-field report; full suite 369/4 (3.14), 353/7 (3.12), wheel smoke OK |
 
 ## 9. Final gate
 

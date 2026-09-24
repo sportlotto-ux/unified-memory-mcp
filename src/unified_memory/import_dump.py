@@ -173,13 +173,13 @@ def _facts(store, rows, owner, rep):
         cur = store.conn.execute(
             "INSERT INTO um_facts(owner, category, name, body, importance,"
             " created_at, updated_at, valid_until, superseded_by, metadata_json,"
-            " confidence, veracity) VALUES(?,?,?,?,?,?,?,?,0,?,?,?)",
+            " confidence, veracity, source_ref) VALUES(?,?,?,?,?,?,?,?,0,?,?,?,?)",
             (own, r["category"], r["name"], r.get("body", ""),
              float(r.get("importance") or 0.5),
              float(r.get("created_at") or 0.0),
              float(r.get("updated_at") or 0.0), vu,
              r.get("metadata_json") or "", float(r.get("confidence", 1.0)),
-             r.get("veracity") or ""))
+             r.get("veracity") or "", r.get("source_ref") or ""))
         m[r["id"]] = cur.lastrowid
         rep["um_facts"]["inserted"] += 1
     # второй проход: superseded_by ссылается на факт, который мог вставиться позже
@@ -257,12 +257,12 @@ def _edges(store, rows, emap, fmap, owner, rep):
         cur = store.conn.execute(
             "INSERT INTO um_edges(subject_id, predicate, object_id, session_id,"
             " owner, fact_id, created_at, valid_until, metadata_json, confidence,"
-            " veracity) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            " veracity, source_ref) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (sid, r["predicate"], oid, r.get("session_id") or "",
              _own(owner, r), fmap.get(r.get("fact_id"), 0),
              float(r.get("created_at") or 0.0), float(r.get("valid_until") or 0.0),
              r.get("metadata_json") or "", float(r.get("confidence", 1.0)),
-             r.get("veracity") or ""))
+             r.get("veracity") or "", r.get("source_ref") or ""))
         m[r["id"]] = cur.lastrowid
         rep["um_edges"]["inserted"] += 1
     return m

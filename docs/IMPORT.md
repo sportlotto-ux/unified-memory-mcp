@@ -43,18 +43,41 @@ summary pipeline может пересчитать summaries. `preserve` — т�
 
 ## Из mnemosyne
 
-Mnemosyne adapter — следующий atomic story P1.6b. До его появления migration
-команда намеренно принимает только `--format lcm`; прямой импорт
-`mnemosyne.db` не выполняется.
+```bash
+# plan/report; target DB берётся из UM_DATABASE_PATH
+python -m unified_memory.migration \
+  --format mnemosyne --input /path/to/mnemosyne.db \
+  --owner-map '{"bank-a":"tenant-a"}' --default-owner tenant-a
 
-Политика будущего adapter:
+# explicit atomic apply
+python -m unified_memory.migration \
+  --format mnemosyne --input /path/to/mnemosyne.db \
+  --owner-map '{"bank-a":"tenant-a"}' --default-owner tenant-a --apply
+```
 
-- canonical facts + version history;
-- triples/edges с owner/bank mapping;
-- confidence/veracity/metadata, когда присутствуют;
-- working/episodic rows — только через явную policy;
-- annotations/persona/scratchpad/vector blobs — отдельный skip report;
-- тот же read-only dry-run, atomic apply, row-count reconciliation и recall checks.
+Mnemosyne adapter импортирует:
+
+- `canonical_facts` как versioned fact slots;
+- `memoria_facts` как durable key/value facts;
+- `triples` и `graph_edges` как entity graph;
+- `consolidated_facts` как graph candidates, если они не дублируют `triples`;
+- `metadata`, `confidence`, `veracity` и source references.
+
+`facts` и `memoria_kg` — derived projections, поэтому они не импортируются
+повторно и явно попадают в `skipped_fields`. `working_memory`, `episodic_memory`
+и `memories` по умолчанию пропускаются. Message rows переносятся только через
+явную policy:
+
+```bash
+python -m unified_memory.migration \
+  --format mnemosyne --input mnemosyne.db --apply \
+  --working-policy message --episodic-policy message --memory-policy message
+```
+
+`annotations`, persona, instructions, preferences, timelines, scratchpad,
+validation/conflict tables и vector blobs не переносятся автоматически; их
+counts и причины skip видны в report. Source content, metadata payloads и
+credentials не попадают в stdout migration report.
 
 ## Проверка паритета
 
