@@ -40,6 +40,15 @@ def test_session_scope(store):
     assert {h.session_id for h in hits} == {"s1"}
 
 
+def test_session_scope_like_fallback_filters_summaries(store):
+    store.add_summary("s1", "бюджет встречи")
+    store.add_summary("s2", "бюджет встречи")
+    store.fts = False
+    hits = store.fts_search("бюджет", scope="session", session_id="s1")
+    assert len(hits) == 1
+    assert hits[0].session_id == "s1"
+
+
 def test_forget_fact(store):
     fid = store.add_fact("c", "n", "b")
     assert store.delete_fact(fid) is True

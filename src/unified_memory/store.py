@@ -1139,7 +1139,7 @@ class Store:
             if owner and ot in ("um_messages", "um_summaries", "um_facts"):
                 cond = f"(owner=?) AND ({cond})"
                 params = [owner] + params
-            if ot == "um_messages" and scope == "session":
+            if ot in ("um_messages", "um_summaries") and scope == "session":
                 cond = f"(session_id=?) AND ({cond})"
                 params = [session_id] + params
             if ot == "um_facts" and as_of is not None:
@@ -1154,9 +1154,9 @@ class Store:
                     f"SELECT {idcol}, {col} FROM {ot} WHERE {cond} LIMIT ?", (*params, limit)):
                 oid, body = r
                 sid = ""
-                if ot == "um_messages":
+                if ot in ("um_messages", "um_summaries"):
                     s = self.conn.execute(
-                        "SELECT session_id FROM um_messages WHERE id=?", (oid,)).fetchone()
+                        f"SELECT session_id FROM {ot} WHERE id=?", (oid,)).fetchone()
                     sid = s[0] if s else ""
                 hits.append(Hit(ot, oid, body, 1.0, sid))
         return hits[:limit]
