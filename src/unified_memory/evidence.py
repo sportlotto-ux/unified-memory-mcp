@@ -365,6 +365,56 @@ def run_validate(store, target: str, claim: str = "", owner: str = "",
             "needs_judgment": True}
 
 
+def run_pack(store, claim: str = "", refs: list[str] | None = None,
+             owner: str = "", max_refs: int = 50, max_chars: int = 8000,
+             partial: float = 0.5, max_neighbours: int = 20,
+             archived_fetch: Callable[[str, int], str | None] | None = None) -> dict:
+    """P2.9: multi-ref pack — per-ref collation + глобальные conflicts.
+
+    Per-ref состав = run_validate без вложенных conflicts (cite/links/
+    annotations/found); глобальные conflicts — один run_conflicts только
+    по явным refs. Вердикта нет, needs_judgment=true всегда.
+    Мусорный ref — bad_ref-rejection, не throw. Read-only.
+    """
+    seen: set[tuple[str, int]] = set()
+    keys: list[tuple[str, int]] = []
+    bad: list[dict] = []
+    for ref in refs or []:
+        try:
+            key = parse_ref(ref)
+        except ValueError as e:
+            bad.append({"ref": ref, "reason_code": "bad_ref",
+                        "detail": str(e)[:120]})
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        keys.append(key)
+    over = keys[max_refs:]
+    keys = keys[:max_refs]
+    items: list[dict] = []
+    targets: list[str] = []
+    for table, tid in keys:
+        target = f"{_SHORT[table]}:{tid}"
+        targets.append(target)
+        v = run_validate(store, target, claim, owner=owner,
+                         max_refs=max_refs, max_chars=max_chars,
+                         partial=partial, max_neighbours=max_neighbours,
+                         archived_fetch=archived_fetch)
+        items.append({"target": v["target"], "kind": v["kind"], "id": v["id"],
+                      "found": v["found"], "cite": v["cite"],
+                      "links": v["links"],
+                      "annotations": v["annotations"]})
+    conflicts = run_conflicts(store, targets, owner=owner, max_refs=max_refs,
+                              max_chars=max_chars, archived_fetch=archived_fetch)
+    conflicts["rejections"].extend(bad)
+    for table, tid in over:
+        conflicts["rejections"].append({"kind": table, "id": tid,
+                                        "reason_code": "budget"})
+    return {"mode": "pack", "claim": claim, "count": len(items),
+            "items": items, "conflicts": conflicts, "needs_judgment": True}
+
+
 def run_extract(store, target: str, owner: str = "",
                 max_refs: int = 50, max_chars: int = 8000,
                 archived_fetch: Callable[[str, int], str | None] | None = None) -> dict:

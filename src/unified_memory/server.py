@@ -33,7 +33,7 @@ from unified_memory.summarize import default_summarizer  # noqa: E402
 from unified_memory import archive  # noqa: E402
 from unified_memory.recent import parse_as_of, parse_period, parse_when  # noqa: E402
 from unified_memory.evidence import (  # noqa: E402
-    parse_ref, run_cite, run_compute, run_conflicts, run_extract,
+    parse_ref, run_cite, run_compute, run_conflicts, run_extract, run_pack,
     run_validate)
 
 mcp = _Server("unified-memory")
@@ -544,7 +544,9 @@ def mem_evidence(claim: str = "", refs: list[str] | None = None,
     """Verify a claim against refs (mode=cite → supported|partial|unsupported)
     or aggregate numbers over refs (mode=compute, op=count|sum|min|max|avg|median).
     mode=conflicts → verdict-free кандидаты противоречий (needs_judgment).
-    Only the refs you pass are used — no auto-search. refs like 'fact:3'."""
+    mode=pack (P2.9) → multi-ref коллатор: per-ref cite/links/annotations +
+    глобальные conflicts, без вердикта. Only the refs you pass are used —
+    no auto-search. refs like 'fact:3'."""
     _ingest()
     cfg = _STATE["cfg"]
     refs = refs or []
@@ -564,8 +566,15 @@ def mem_evidence(claim: str = "", refs: list[str] | None = None,
                             max_refs=cfg.evidence_max_refs,
                             max_chars=cfg.evidence_max_chars,
                             archived_fetch=_archive_fetch(cfg))
+    elif mode == "pack":
+        out = run_pack(_STATE["store"], claim, refs, owner=owner,
+                       max_refs=cfg.evidence_max_refs,
+                       max_chars=cfg.evidence_max_chars,
+                       partial=cfg.evidence_partial,
+                       archived_fetch=_archive_fetch(cfg))
     else:
-        raise ValueError(f"unknown mode {mode!r}: cite | compute | conflicts")
+        raise ValueError(
+            f"unknown mode {mode!r}: cite | compute | conflicts | pack")
     return json.dumps(out, ensure_ascii=False)
 
 

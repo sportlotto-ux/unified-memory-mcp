@@ -822,6 +822,71 @@ mmr_lambda?, scope_bias?)` — явные per-call значения поверх
 **Validation:** полный suite на Python 3.14 и 3.12, `git diff --check`, wheel
 build/install/import smoke из clean venv.
 
+## 5.9 P2.9 — LCM evidence pack (multi-ref collation, verdict-free)
+
+**Use case:** хост собрал N refs (из recall, задачи, соседей validate) и одним
+вызовом получает детерминированный пак: per-ref опора/линки/пометки плюс
+глобальные кандидаты противоречий — и сам выносит вердикт.
+
+**Проблема:** сегодня пак собирается N+1 вызовами (`mem_validate` на каждый
+ref + отдельный `mem_evidence(conflicts)`); единого bounded multi-ref
+коллатора нет, LCM-семья `compile_evidence/evidence_pack` не закрыта.
+
+**Пользовательский эффект:** `mem_evidence(mode="pack", claim?, refs, owner)` →
+`{mode: "pack", claim, count, items, conflicts, needs_judgment: true}`.
+`items[i]` = `{target, kind, id, found, cite|null, links, annotations}` (тот же
+состав, что `mem_validate`, но без вложенных conflicts); `conflicts` — один
+глобальный `run_conflicts` по явным refs. Вердикта нет — судьёй остаётся хост.
+
+**Scope:**
+
+- pure `run_pack` в `evidence.py` + ветка `mode="pack"` в `mem_evidence`
+  (ro, idempotent), без новых таблиц, тулов и `UM_*`;
+- per-ref reuse `run_validate` (cite при непустом claim, живые
+  `supports/contradicts`, annotations, neighbour-контекст внутри validate);
+  bad ref в паке — не throw (в отличие от одиночного validate), а запись
+  в `conflicts.rejections` (`bad_ref`), item не создаётся;
+- глобальный `conflicts` — только по явным refs (без neighbour-раздувания);
+- dedupe с сохранением порядка; срез `max_refs` — сверх лимита только
+  `budget`-rejections внутри `conflicts` (как у cite/compute);
+- бюджеты `max_refs/max_chars/partial` — те же `cfg.evidence_*`, соседей
+  на ref — cap 20 как в validate;
+- owner/bank-изоляция и archive-fetch наследуются от вызываемых слоёв
+  (`ref_details` → `found: false`, `_resolve` → `rejections`
+  `owner_mismatch/bank_hidden/not_found/archived`).
+
+**Non-goals:**
+
+- автопоиск refs по claim (refs только явные — тихий выбор источников stop);
+- compute-агрегация внутри пака (остаётся отдельным `mode="compute"`);
+- вердикты, скоры доверия, кворумы; влияние на recall/assemble ranking;
+- neighbour-раздувание глобальных conflicts; новые режимы кроме `pack`;
+- batch-записи, воркеры, смена migration policy.
+
+**Красные тесты** (`tests/test_pack.py`, 6 шт.): пустой пак; per-ref cite +
+глобальные conflicts пусты; slot_versions через версии; owner/bank-изоляция
++ legacy; budget-срез + bad ref без throw; read-only invariance + повтор
+бит-в-бит + server passthrough.
+
+**Acceptance criteria:**
+
+- мусорный ref — rejection, не throw и не обрыв пака;
+- чужая/банковская цель — `found: false`, сигнал в `conflicts.rejections`;
+- сверх `max_refs` — только `budget`-rejections, items в пределах лимита;
+- top-level `verdict` отсутствует; `needs_judgment: true` всегда;
+- recall/assemble бит-в-бит до/после; legacy `owner=""` видит всё.
+
+**Rollback/failure behavior:** pure read-only collation поверх существующих
+read-paths; отказ `mode` — `ValueError` до чтения; новый код не пишет
+ни одной строки.
+
+**Docs/config impact:** `README.md` (дока `mem_evidence`, без новых тулов),
+`CHANGELOG.md`, status log; новых тулов/`UM_*`/миграций/`IMPORT.md`-изменений
+нет.
+
+**Validation:** полный suite на Python 3.14 и 3.12, `git diff --check`, wheel
+build/install/import smoke из clean venv.
+
 ## 6. Story template
 
 Каждая story должна иметь этот блок до начала кода:
@@ -873,6 +938,7 @@ Validation:
 | P2.6 extract | done (uncommitted) | — | EndpointExtractor + mem_extract preview-only (strict JSON, caps, no writes), reuse UM_SUMMARIZER_*, loud errors, no new tables/config; full suite 406/4 (3.14), wheel smoke OK |
 | P2.7 banks | done (uncommitted) | — | um_facts.bank + um_grants read-only sharing, visibility on recall/get/expand/evidence, slot+index migration, legacy preserved; full suite 414/4 (3.14), wheel smoke OK |
 | P2.8 adaptive | done (uncommitted) | — | per-call importance/mmr/scope-bias overrides on recall+mem_recall, effective in diagnostics, defaults bitwise; full suite 420/4 (3.14), wheel smoke OK |
+| P2.9 pack | done (uncommitted) | — | mem_evidence(mode=pack): per-ref cite/links/annotations + global conflicts, explicit refs, bad_ref without throw, no new tables/config; full suite 426/4 (3.14), wheel smoke OK |
 
 ## 9. Final gate
 

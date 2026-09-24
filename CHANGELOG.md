@@ -32,6 +32,9 @@
   boundaries; legacy semantics preserved.
 - P2.8: per-call rerank overrides (`importance_weight/mmr_lambda/scope_bias`
   on `mem_recall`, `None` = config); defaults and legacy ranking unchanged.
+- P2.9: `mem_evidence(mode=pack)` multi-ref collation (per-ref cite/links/
+  annotations + global conflicts, verdict-free); explicit refs only, no
+  auto-search, no new tables/config.
 - Migration metadata columns for source references, confidence, veracity, and
   tool metadata; export/import and `mem_get` preserve them.
 
