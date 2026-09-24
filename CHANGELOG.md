@@ -3,7 +3,15 @@
 Все значимые изменения. Формат близок к Keep a Changelog; версии — SemVer.
 Ранние версии (0.1–0.3) сжаты: это была внутренняя сборка до публикации.
 
-## [Unreleased] — post-0.8.0 hardening
+## [Unreleased] — 0.9.0 development
+### Added
+- P1.1–P1.5 parity additions: metadata inspection, lineage, archive recall,
+  bounded importance ranking, and `mem_graph_query`.
+- P1.6a: read-only LCM migration adapter with dry-run reconciliation, atomic
+  apply, source ordering/provenance metadata, and explicit summary policy.
+- Migration metadata columns for source references, confidence, veracity, and
+  tool metadata; export/import and `mem_get` preserve them.
+
 ### Data integrity
 - Archive moves, atomic export/import validation, schema migrations, embedding writes,
   fact updates, BFS session scope, and compaction/condensation are crash-safe and

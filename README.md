@@ -95,6 +95,24 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 | `mem_status` | Счётчики + флаги деградации (`vectors_enabled`, `summarizer`, `fts`) |
 | `mem_doctor` | `integrity_check`, вектора по моделям, hygiene; read-only `export` (JSON-дамп в `<db>.export-<ts>.json`, вектора base64, архив не входит), `archive_check` (заглушки ↔ архив, orphans), `secret_scan` (каталог redaction, отчёт без значений); мутации `clean`/`repair` (backup-first), `archive`/`purge`/`retention` (только с `apply=true`; `retention` — age-based вынос горячего старше `UM_RETENTION_DAYS`) |
 
+## Миграция P1.6
+
+LCM snapshot importer работает через read-only SQLite URI и по умолчанию только
+строит reconciliation report:
+
+```bash
+python -m unified_memory.migration --format lcm --input /path/to/lcm.db
+# explicit atomic apply
+python -m unified_memory.migration --format lcm --input /path/to/lcm.db --apply
+```
+
+Raw `messages` переносятся в порядке `store_id`; `conversation_id`, source ordering
+и redaction-gated tool metadata сохраняются. LCM `summary_nodes` по умолчанию
+не копируются — summaries пересчитываются Unified. Для явного сохранения source
+summaries добавьте `--summary-strategy preserve --apply`. Отчёт не содержит source
+content или tool payload. Mnemosyne adapter будет отдельным P1.6b; `--format lcm`
+сейчас является единственным поддерживаемым migration format.
+
 ## Как это работает
 
 - **Хранение:** одна SQLite (WAL): `um_messages` + `um_summaries` (DAG) + `um_facts` + `um_entities`/`um_edges` (граф) + `um_links` (типизированные связи, traversal-only) + `um_vectors` + `um_fts` (FTS5) + `um_meta`.
@@ -145,11 +163,12 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 | `UM_MAX_TEXT_CHARS` | `200000` | Кап входного текста (громкий `ValueError`, не тихая обрезка) |
 | `UM_COMPACT_MAX_MSGS` | `10000` | Кап головы компакшна за проход (остаток досжимается следующим вызовом) |
 
-## Известные ограничения (v0.8)
+## Известные ограничения (v0.9)
 
 Полный список отложенного — `docs/BACKLOG.md`.
 
 - Архив выносит только **сообщения** (текст+вектор) — основной драйвер роста. Истёкшие факты/рёбра и `um_summaries` — TODO (`docs/BACKLOG.md`).
+- Миграция upstream: P1.6a LCM adapter поддерживает dry-run/atomic apply и reconciliation report; Mnemosyne adapter (P1.6b) ещё не реализован и не принимается CLI.
 - `mem_doctor(mode=export)` пишет **стриминговый JSONL** (`um-export-jsonl`: header + `{table,row}` построчно; вектора base64, um_fts/um_vecidx исключены). Импорт — `python -m unified_memory.import_dump <file> [--owner] [--dry-run]`, аддитивный (fresh-id remap, слот-конфликт → skip), без backend. **Чтение дампа — целиком в память** (стриминг только на записи).
 - Isolation добровольная: `owner=""` (дефолт) — legacy без фильтра, видит всё; строгая изоляция — только при непустом `owner`. Старые БД мигрируют сами (`owner=''`), сущности пересобираются под `UNIQUE(name, owner)`.
 - Поддерживается MCP Python SDK 2.x (`mcp>=2.0,<3`); MCP 1.x intentionally не входит в dependency contract.
@@ -161,7 +180,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 ## Разработка
 
 ```bash
-python -m pytest tests/ -q   # текущий dev-прогон: 328 passed, 4 skipped
+python -m pytest tests/ -q   # текущий dev-прогон: 365 passed, 4 skipped (Python 3.14)
 ```
 
 Полный suite также прогоняется на Python 3.12; CI дополнительно собирает wheel,
