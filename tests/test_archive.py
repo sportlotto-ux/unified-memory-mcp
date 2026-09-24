@@ -69,6 +69,25 @@ def test_move_moves_text_and_vector(cfg, store):
     assert "сообщение 2" in row[0]
 
 
+def test_archive_invalidates_pressure_counters(cfg, store):
+    from unified_memory.engine import ActiveWindow
+    from unified_memory.store import estimate_tokens
+
+    _fill(store, 3)
+    conn = archive.open_archive(cfg.archive_path)
+    try:
+        archive.move_oldest(store, conn, limit=1, label="x")
+    finally:
+        conn.close()
+    assert store.meta_get("raw_tokens:s") is None
+    p = ActiveWindow(store, None, cfg).pressure("s")
+    expected = sum(
+        estimate_tokens(m["content"])
+        for m in store.session_messages("s", limit=1000000)
+    )
+    assert p.raw_backlog_tokens == expected
+
+
 def test_second_move_skips_archived(cfg, store):
     _fill(store, 3)
     conn = archive.open_archive(cfg.archive_path)

@@ -298,52 +298,104 @@ class Ingest:
     def router(self) -> Router:
         return Router(self.store, self.backend, self.cfg)
 
-    def reindex(self, batch: int = 64, owner: str = "") -> dict:
-        """Лестница после смены модели: довложить вектора, которых нет.
+    def _embedding_jobs(self, owner: str = "", missing_only: bool = True
+                        ) -> list[tuple[str, int, str, str]]:
+        jobs: list[tuple[str, int, str, str]] = []
 
-        Идёмпотентен: трогает только owner без векторов. Чужие dim не трогает
-        (их надо удалять руками — это уже миграция, не reindex).
-        """
+        def query(sql: str, alias: str) -> list[tuple]:
+            sql += " WHERE " + ("v.id IS NULL" if missing_only else "1=1")
+            params: tuple = ()
+            if owner:
+                sql += f" AND {alias}.owner=?"
+                params = (owner,)
+            return self.store.select(sql, params)
+
+        for oid, content, own, external_ref in query(
+                "SELECT m.id, m.content, m.owner, m.externalized_ref"
+                " FROM um_messages m"
+                " LEFT JOIN um_vectors v ON v.owner_table='um_messages'"
+                " AND v.owner_id=m.id", "m"):
+            if content and not (external_ref or ""):
+                jobs.append(("um_messages", oid, content, own or ""))
+        for oid, body, own in query(
+                "SELECT s.id, s.body, s.owner FROM um_summaries s"
+                " LEFT JOIN um_vectors v ON v.owner_table='um_summaries'"
+                " AND v.owner_id=s.id", "s"):
+            jobs.append(("um_summaries", oid, body, own or ""))
+        for oid, name, body, own in query(
+                "SELECT f.id, f.name, f.body, f.owner FROM um_facts f"
+                " LEFT JOIN um_vectors v ON v.owner_table='um_facts'"
+                " AND v.owner_id=f.id", "f"):
+            jobs.append(("um_facts", oid, f"{name} {body}", own or ""))
+        for oid, sname, pred, oname, own in query(
+                "SELECT e.id, COALESCE(NULLIF(s.display,''),s.name),"
+                " e.predicate, COALESCE(NULLIF(o.display,''),o.name), e.owner"
+                " FROM um_edges e"
+                " JOIN um_entities s ON s.id=e.subject_id"
+                " JOIN um_entities o ON o.id=e.object_id"
+                " LEFT JOIN um_vectors v ON v.owner_table='um_edges'"
+                " AND v.owner_id=e.id", "e"):
+            jobs.append(("um_edges", oid, f"{sname} {pred} {oname}", own or ""))
+        for oid, display, own in query(
+                "SELECT e.id, COALESCE(NULLIF(e.display,''),e.name), e.owner"
+                " FROM um_entities e"
+                " LEFT JOIN um_vectors v ON v.owner_table='um_entities'"
+                " AND v.owner_id=e.id", "e"):
+            jobs.append(("um_entities", oid, display, own or ""))
+        return jobs
+
+    def reindex(self, batch: int = 64, owner: str = "") -> dict:
+        """Embed missing vectors without changing the active model."""
         if self.backend is None:
             raise ValueError("no embedding backend: FTS-only store has nothing to reindex")
         model = self.backend.model_name
         report: dict[str, int] = {"embedded": 0, "model_dim": self.backend.dim}
-        jobs: list[tuple[str, int, str]] = []
-        for oid, content in self.store.select(
-                """SELECT m.id, m.content FROM um_messages m
-                   LEFT JOIN um_vectors v ON v.owner_table='um_messages' AND v.owner_id=m.id
-                   WHERE v.id IS NULL"""
-                + (" AND m.owner=?" if owner else ""), (owner,) if owner else ()):
-            jobs.append(("um_messages", oid, content))
-        for oid, name, body in self.store.select(
-                """SELECT f.id, f.name, f.body FROM um_facts f
-                   LEFT JOIN um_vectors v ON v.owner_table='um_facts' AND v.owner_id=f.id
-                   WHERE v.id IS NULL"""
-                + (" AND f.owner=?" if owner else ""), (owner,) if owner else ()):
-            jobs.append(("um_facts", oid, f"{name} {body}"))
-        for eid, sname, pred, oname in self.store.select(
-                """SELECT e.id, s.display, e.predicate, o.display FROM um_edges e
-                   JOIN um_entities s ON s.id=e.subject_id
-                   JOIN um_entities o ON o.id=e.object_id
-                   LEFT JOIN um_vectors v ON v.owner_table='um_edges' AND v.owner_id=e.id
-                   WHERE v.id IS NULL"""
-                + (" AND e.owner=?" if owner else ""), (owner,) if owner else ()):
-            jobs.append(("um_edges", eid, f"{sname} {pred} {oname}"))
-        for ent_id, display in self.store.select(
-                """SELECT e.id, e.display FROM um_entities e
-                   LEFT JOIN um_vectors v ON v.owner_table='um_entities' AND v.owner_id=e.id
-                   WHERE v.id IS NULL"""
-                + (" AND e.owner=?" if owner else ""), (owner,) if owner else ()):
-            jobs.append(("um_entities", ent_id, display or ""))
+        jobs = self._embedding_jobs(owner=owner, missing_only=True)
         for i in range(0, len(jobs), batch):
             chunk = jobs[i:i + batch]
-            vecs = self.backend.embed_docs([text for _, _, text in chunk])
-            for (ot, oid, _), vec in zip(chunk, vecs):
-                self.store.add_vector(ot, oid, vec, model, owner)
+            vecs = self.backend.embed_docs([text for _, _, text, _ in chunk])
+            for (ot, oid, _, own), vec in zip(chunk, vecs):
+                self.store.add_vector(ot, oid, vec, model, own)
                 report["embedded"] += 1
         if self.cfg.vec_index != "off":
             try:
                 report["vec_index"] = self.store.build_vec_index(self.backend.dim)
-            except Exception as e:  # noqa: BLE001 — нет sqlite-vec: вектора уже доложены
+            except Exception as e:  # noqa: BLE001 — вектора уже доложены
+                report["vec_index_error"] = f"{type(e).__name__}: {e}"[:200]
+        return report
+
+    def reembed(self, batch: int = 64) -> dict:
+        """Atomically replace every source vector with the active backend model."""
+        if self.backend is None:
+            raise ValueError("no embedding backend: cannot reembed")
+        model = self.backend.model_name
+        report: dict[str, int] = {"embedded": 0, "model_dim": self.backend.dim}
+        jobs = self._embedding_jobs(missing_only=False)
+        with self.store.transaction():
+            # Disable the old vec0 index while vectors are being replaced.
+            self.store.execute_write(
+                "DELETE FROM um_meta WHERE key='vec_index_dim'", _commit=False)
+            for i in range(0, len(jobs), batch):
+                chunk = jobs[i:i + batch]
+                vecs = self.backend.embed_docs([text for _, _, text, _ in chunk])
+                if len(vecs) != len(chunk):
+                    raise ValueError(
+                        f"embedding backend returned {len(vecs)} vectors "
+                        f"for {len(chunk)} inputs")
+                for (ot, oid, _, own), vec in zip(chunk, vecs):
+                    if len(vec) != self.backend.dim:
+                        raise ValueError(
+                            f"embedding dimension mismatch: got {len(vec)}, "
+                            f"expected {self.backend.dim}")
+                    self.store.add_vector(
+                        ot, oid, vec, model, own, _commit=False,
+                        _allow_model_mismatch=True)
+                    report["embedded"] += 1
+            self.store.meta_set("embedding_model", model, _commit=False)
+            self.store.meta_set("embedding_dim", str(self.backend.dim), _commit=False)
+        if self.cfg.vec_index != "off":
+            try:
+                report["vec_index"] = self.store.build_vec_index(self.backend.dim)
+            except Exception as e:  # noqa: BLE001 — vectors are already replaced
                 report["vec_index_error"] = f"{type(e).__name__}: {e}"[:200]
         return report

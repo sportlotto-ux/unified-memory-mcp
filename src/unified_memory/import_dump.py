@@ -310,6 +310,12 @@ def import_dump(store: Store, path: str | Path, owner: str | None = None,
                 "um_summaries": smap, "um_edges": edgemap}
         _links(store, tables.get("um_links", []), maps, owner, rep)
         _vectors(store, vec_rows, maps, owner, rep, target_dim)
+        # Imported rows bypass Store write helpers; invalidate all derived
+        # pressure state so the next read rebuilds it from durable rows.
+        store.conn.execute(
+            "DELETE FROM um_meta WHERE key LIKE 'tokens:%'"
+            " OR key LIKE 'raw_tokens:%' OR key LIKE 'summary_tokens:%'"
+            " OR key LIKE 'frontier:%'")
         store.rebuild_fts()
     # build_vec_index коммитит внутри — только ПОСЛЕ транзакции (guardrail: commit
     # внутри разорвал бы контур). Backend не нужен: источник — um_vectors,

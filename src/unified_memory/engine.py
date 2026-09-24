@@ -26,6 +26,9 @@ class Pressure:
     over: bool
     messages: int
     summaries: int
+    raw_backlog_tokens: int = 0
+    active_summary_tokens: int = 0
+    compactable_tokens: int = 0
 
 
 def _mkey(base: str, session_id: str, owner: str) -> str:
@@ -44,20 +47,33 @@ class ActiveWindow:
         return int(self.cfg.context_tokens * self.cfg.compact_threshold)
 
     def pressure(self, session_id: str, owner: str = "") -> Pressure:
-        # #3: инкрементный счётчик вместо полного скана на каждое сообщение.
         tkey = _mkey("tokens", session_id, owner)
-        raw = self.store.meta_get(tkey)
-        if raw is None:  # старая БД — один полный скан, дальше инкремент
-            msgs = self.store.session_messages(session_id, limit=1000000, owner=owner)
+        raw_key = _mkey("raw_tokens", session_id, owner)
+        summary_key = _mkey("summary_tokens", session_id, owner)
+        raw = self.store.meta_get(raw_key)
+        summary = self.store.meta_get(summary_key)
+        if raw is None or summary is None:
+            # Legacy stores have only the historical total counter. Rebuild the
+            # split once from the frontier; the durable rows remain authoritative.
+            frontier = int(self.store.meta_get(_mkey("frontier", session_id, owner)) or 0)
+            msgs = self.store.session_messages(
+                session_id, after_id=frontier, limit=1000000, owner=owner)
             sums = self.store.select(
                 "SELECT body FROM um_summaries WHERE session_id=?"
-                + (" AND owner=?" if owner else ""),
+                + (" AND owner=?" if owner else "")
+                + " AND superseded_by=0",
                 (session_id, owner) if owner else (session_id,))
-            total = sum(estimate_tokens(m["content"]) for m in msgs)
-            total += sum(estimate_tokens(r[0]) for r in sums)
-            self.store.meta_set(tkey, str(total))
+            raw_total = sum(estimate_tokens(m["content"]) for m in msgs)
+            summary_total = sum(estimate_tokens(r[0]) for r in sums)
+            self.store.meta_set(raw_key, str(raw_total))
+            self.store.meta_set(summary_key, str(summary_total))
         else:
-            total = int(raw)
+            raw_total = int(raw)
+            summary_total = int(summary)
+        total = raw_total + summary_total
+        stored_total = self.store.meta_get(tkey)
+        if stored_total != str(total):
+            self.store.meta_set(tkey, str(total))
         if owner:
             n_msgs = self.store.select(
                 "SELECT count(*) FROM um_messages WHERE session_id=? AND owner=?",
@@ -70,8 +86,15 @@ class ActiveWindow:
                 "SELECT count(*) FROM um_messages WHERE session_id=?", (session_id,))[0][0]
             n_sums = self.store.select(
                 "SELECT count(*) FROM um_summaries WHERE session_id=?", (session_id,))[0][0]
+        fresh_tokens = 0
+        if self.cfg.fresh_tail:
+            fresh = self.store.session_messages_tail(
+                session_id, limit=self.cfg.fresh_tail, owner=owner)
+            fresh_tokens = sum(estimate_tokens(m["content"]) for m in fresh)
+        compactable = max(0, raw_total - fresh_tokens)
         th = self.threshold_tokens()
-        return Pressure(total, th, total >= th, n_msgs, n_sums)
+        return Pressure(total, th, compactable >= th, n_msgs, n_sums,
+                        raw_total, summary_total, compactable)
 
     def maybe_compact(self, session_id: str, owner: str = "") -> dict:
         """Авто-компакшн при превышении порога. Bounded: проход + конденсация.
@@ -80,7 +103,13 @@ class ActiveWindow:
         сжимается один раз, повторные вызовы поверх того же покрытия — noop.
         """
         p = self.pressure(session_id, owner)
-        base = {"pressure": p.tokens_total, "threshold": p.threshold_tokens}
+        base = {
+            "pressure": p.tokens_total,
+            "raw_backlog_tokens": p.raw_backlog_tokens,
+            "active_summary_tokens": p.active_summary_tokens,
+            "compactable_tokens": p.compactable_tokens,
+            "threshold": p.threshold_tokens,
+        }
         if not p.over or self.summarizer is None:
             return {"status": "ok", **base}
         fkey = _mkey("frontier", session_id, owner)
@@ -94,6 +123,13 @@ class ActiveWindow:
         fresh = msgs[-self.cfg.fresh_tail:] if self.cfg.fresh_tail else []
         fresh_ids = {m["id"] for m in fresh}
         head = [m for m in msgs if m["id"] not in fresh_ids]
+        # Do not create a permanent one-message summary for every oversized
+        # message. Wait for one more compactable message unless the bounded
+        # pass itself is limited to a single row.
+        if (len(head) == 1 and len(msgs) == self.cfg.fresh_tail + 1
+                and self.cfg.compact_max_msgs > 1):
+            return {"status": "ok", **base, "deferred": True,
+                    "reason": "min_batch"}
         if head:
             try:
                 body = self.summarizer.summarize(
@@ -107,6 +143,9 @@ class ActiveWindow:
                     session_id, body, depth=0,
                     covers_from=head[0]["id"], covers_to=head[-1]["id"],
                     owner=owner, _commit=False)
+                self.store.bump_raw_tokens(
+                    session_id, -sum(estimate_tokens(m["content"]) for m in head),
+                    owner, _commit=False)
                 self.store.meta_set(fkey, str(head[-1]["id"]), _commit=False)
                 report["leaf_summary"] = sid
                 report["covered"] = len(head)
@@ -161,9 +200,10 @@ class ActiveWindow:
                 f" WHERE id IN ({','.join('?' * len(kids))})",
                 tuple(k[0] for k in kids), _commit=False)
             # Счётчик честный: дети больше не в активном окне — вычитаем их тела.
-            self.store.bump_tokens(
-                session_id, -sum(estimate_tokens(k[1]) for k in kids), owner,
-                _commit=False)
+            child_tokens = sum(estimate_tokens(k[1]) for k in kids)
+            self.store.bump_tokens(session_id, -child_tokens, owner, _commit=False)
+            self.store.bump_summary_tokens(
+                session_id, -child_tokens, owner, _commit=False)
             out.append({"from_depth": depth, "to_depth": depth + 1,
                         "summary_id": sid, "children": len(kids)})
         return out

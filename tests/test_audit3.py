@@ -126,6 +126,70 @@ def test_counter_subtracts_superseded(ing):
     assert int(ing.store.meta_get("tokens:s1")) == expect
 
 
+def test_compaction_waits_for_compactable_backlog(tmp_path):
+    cfg = Config(db_path=tmp_path / "backlog.db", archive_path=tmp_path / "a.db",
+                 context_tokens=200, compact_threshold=0.5, fresh_tail=1,
+                 dag_fanin=2)
+    store = Store(cfg)
+    ing = Ingest(store, None, ExtractiveSummarizer(), cfg)
+    try:
+        reports = [
+            ing.remember_message(
+                "s1", "user", f"сообщение {i} про бюджет и планы " * 2
+            )["compaction"]
+            for i in range(16)
+        ]
+        compacted = sum(r["status"] == "compacted" for r in reports)
+        assert 1 <= compacted <= 5, compacted
+    finally:
+        store.close()
+
+
+def test_compaction_batches_single_message_backlog(tmp_path):
+    cfg = Config(db_path=tmp_path / "single.db", archive_path=tmp_path / "a.db",
+                 context_tokens=40, compact_threshold=0.5, fresh_tail=1,
+                 dag_fanin=2)
+    store = Store(cfg)
+    ing = Ingest(store, None, ExtractiveSummarizer(), cfg)
+    try:
+        reports = [
+            ing.remember_message(
+                "s1", "user", f"сообщение {i} про бюджет и планы " * 2
+            )["compaction"]
+            for i in range(16)
+        ]
+        compacted = sum(r["status"] == "compacted" for r in reports)
+        assert compacted <= 8, compacted
+    finally:
+        store.close()
+
+
+def test_compaction_pressure_splits_raw_and_live_summaries(tmp_path):
+    cfg = Config(db_path=tmp_path / "parts.db", archive_path=tmp_path / "a.db",
+                 context_tokens=200, compact_threshold=0.5, fresh_tail=1,
+                 dag_fanin=2)
+    store = Store(cfg)
+    ing = Ingest(store, None, ExtractiveSummarizer(), cfg)
+    try:
+        for i in range(8):
+            ing.remember_message(
+                "s1", "user", f"сообщение {i} про бюджет и планы " * 2
+            )
+        frontier = int(store.meta_get("frontier:s1") or 0)
+        raw = store.session_messages("s1", after_id=frontier, limit=1000000)
+        live = store.select(
+            "SELECT body FROM um_summaries WHERE session_id='s1'"
+            " AND superseded_by=0"
+        )
+        raw_tokens = sum(estimate_tokens(m["content"]) for m in raw)
+        summary_tokens = sum(estimate_tokens(r[0]) for r in live)
+        assert int(store.meta_get("raw_tokens:s1")) == raw_tokens
+        assert int(store.meta_get("summary_tokens:s1")) == summary_tokens
+        assert int(store.meta_get("tokens:s1")) == raw_tokens + summary_tokens
+    finally:
+        store.close()
+
+
 def test_recall_long_body_snippet_bounded(tmp_path, monkeypatch):
     """A4 (v0.7.3): длинное FTS-тело отдаётся bounded-сниппетом, не маркером усечения."""
     monkeypatch.setenv("UM_DATABASE_PATH", str(tmp_path / "g.db"))

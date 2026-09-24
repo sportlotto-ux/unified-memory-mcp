@@ -636,16 +636,34 @@ class Store:
                 self._sp_stack.pop()
 
     @_locked
-    def bump_tokens(self, session_id: str, delta: int, owner: str = "",
-                    _commit: bool = True) -> None:
-        """#3: инкрементный счётчик давления. Вызывать из locked-контекста."""
-        key = f"tokens:{owner}:{session_id}" if owner else f"tokens:{session_id}"
+    def _bump_metric(self, name: str, session_id: str, delta: int,
+                     owner: str = "", _commit: bool = True) -> None:
+        key = f"{name}:{owner}:{session_id}" if owner else f"{name}:{session_id}"
         self.conn.execute(
             "INSERT INTO um_meta(key, value) VALUES(?,?)"
             " ON CONFLICT(key) DO UPDATE"
             " SET value=CAST(value AS INTEGER)+CAST(excluded.value AS INTEGER)",
             (key, str(delta)))
         self._commit_if(_commit)
+
+    @_locked
+    def bump_tokens(self, session_id: str, delta: int, owner: str = "",
+                     _commit: bool = True) -> None:
+        """Increment the legacy total pressure counter."""
+        self._bump_metric("tokens", session_id, delta, owner, _commit)
+
+
+    @_locked
+    def bump_raw_tokens(self, session_id: str, delta: int, owner: str = "",
+                        _commit: bool = True) -> None:
+        """Increment uncovered raw-message pressure."""
+        self._bump_metric("raw_tokens", session_id, delta, owner, _commit)
+
+    @_locked
+    def bump_summary_tokens(self, session_id: str, delta: int, owner: str = "",
+                            _commit: bool = True) -> None:
+        """Increment live-summary pressure."""
+        self._bump_metric("summary_tokens", session_id, delta, owner, _commit)
 
     @_locked
     def meta_set(self, key: str, value: str, _commit: bool = True) -> None:
@@ -666,7 +684,9 @@ class Store:
         )
         mid = cur.lastrowid
         self._fts_index("um_messages", mid, content)
-        self.bump_tokens(session_id, estimate_tokens(content), owner, _commit=False)
+        tokens = estimate_tokens(content)
+        self.bump_tokens(session_id, tokens, owner, _commit=False)
+        self.bump_raw_tokens(session_id, tokens, owner, _commit=False)
         self._commit_if(_commit)
         return mid
 
@@ -937,14 +957,17 @@ class Store:
         )
         sid = cur.lastrowid
         self._fts_index("um_summaries", sid, body)
-        self.bump_tokens(session_id, estimate_tokens(body), owner, _commit=False)
+        tokens = estimate_tokens(body)
+        self.bump_tokens(session_id, tokens, owner, _commit=False)
+        self.bump_summary_tokens(session_id, tokens, owner, _commit=False)
         self._commit_if(_commit)
         return sid
 
     @_locked
     def add_vector(self, owner_table: str, owner_id: int,
                    vec: list[float], model: str, owner: str = "",
-                   _commit: bool = True) -> None:
+                   _commit: bool = True,
+                   _allow_model_mismatch: bool = False) -> None:
         stored_model = self.meta_get("embedding_model")
         if stored_model is None:
             self.conn.execute(
@@ -953,7 +976,7 @@ class Store:
             self.conn.execute(
                 "INSERT OR IGNORE INTO um_meta(key, value) VALUES(?, ?)",
                 ("embedding_dim", str(len(vec))))
-        else:
+        elif not _allow_model_mismatch:
             check_store_dim(len(vec), model, self.meta_get)
         # Replace-семантика (#5): повторный embed того же owner не плодит дубли.
         self.conn.execute(
@@ -1064,13 +1087,56 @@ class Store:
         tables = tables[scope]
         if self.fts and max(len(t) for t in terms) >= 3:
             match = " OR ".join(f'"{t}"' for t in terms[:10] if len(t) >= 3)
+            # The FTS table stores only (owner_table, owner_id, body), so scope
+            # filters must be joined back to the parent rows before LIMIT.
+            # Filtering after the global FTS limit lets unrelated sessions or
+            # owners consume the whole candidate set.
+            alias_by_table = {
+                "um_messages": "m", "um_summaries": "s",
+                "um_facts": "fct", "um_edges": "e",
+            }
+            joins = []
+            scoped = []
+            scope_params: list = []
+            for table in tables:
+                alias = alias_by_table[table]
+                joins.append(
+                    f" LEFT JOIN {table} AS {alias}"
+                    f" ON f.owner_table='{table}' AND f.owner_id={alias}.id"
+                )
+                checks = [f"{alias}.id IS NOT NULL"]
+                if owner:
+                    checks.append(f"{alias}.owner=?")
+                    scope_params.append(owner)
+                if scope == "session" and table in (
+                        "um_messages", "um_summaries", "um_edges"):
+                    checks.append(f"{alias}.session_id=?")
+                    scope_params.append(session_id)
+                if table in ("um_facts", "um_edges"):
+                    if as_of is not None:
+                        checks.extend([
+                            f"{alias}.created_at<=?",
+                            f"({alias}.valid_until=0 OR {alias}.valid_until>?)",
+                        ])
+                        scope_params.extend([as_of, as_of])
+                    elif not include_expired:
+                        checks.append(
+                            f"({alias}.valid_until=0 OR {alias}.valid_until>?)"
+                        )
+                        scope_params.append(time.time())
+                scoped.append(
+                    f"(f.owner_table='{table}' AND {' AND '.join(checks)})"
+                )
             ph = ",".join("?" * len(tables))
-            q = ("SELECT owner_table, owner_id,"
-                 " snippet(um_fts, 2, '[', ']', '…', 8) FROM um_fts"
-                 f" WHERE um_fts MATCH ? AND owner_table IN ({ph})"
+            q = ("SELECT f.owner_table, f.owner_id,"
+                 " snippet(um_fts, 2, '[', ']', '…', 8) FROM um_fts AS f"
+                 + "".join(joins)
+                 + f" WHERE um_fts MATCH ? AND f.owner_table IN ({ph})"
+                 + " AND (" + " OR ".join(scoped) + ")"
                  " ORDER BY rank LIMIT ?")
             try:
-                rows = self.conn.execute(q, (match, *tables, limit * 3)).fetchall()
+                rows = self.conn.execute(
+                    q, (match, *tables, *scope_params, limit * 3)).fetchall()
             except sqlite3.OperationalError:
                 rows = []
             cand = [(ot, oid) for ot, oid, _ in rows if ot in tables]
@@ -1431,6 +1497,11 @@ class Store:
         if self.fts:
             self.conn.execute(
                 "DELETE FROM um_fts WHERE owner_table='um_messages' AND owner_id=?", (mid,))
+        # Archiving changes the raw-message set. Force a one-time pressure
+        # rebuild instead of leaving stale per-session counters behind.
+        self.conn.execute(
+            "DELETE FROM um_meta WHERE key LIKE 'tokens:%'"
+            " OR key LIKE 'raw_tokens:%' OR key LIKE 'summary_tokens:%'")
         self.conn.commit()
 
     @_locked

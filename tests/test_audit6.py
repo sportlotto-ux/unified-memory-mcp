@@ -29,6 +29,37 @@ def test_fts_scope_pushdown_not_starved(tmp_path):
         s.close()
 
 
+def test_fts_session_scope_not_starved_after_global_limit(tmp_path):
+    """Session filter must run before the global FTS candidate limit."""
+    s = _store(tmp_path)
+    try:
+        if not s.fts:
+            pytest.skip("FTS5 unavailable")
+        for _ in range(100):
+            s.add_message("foreign", "user", "zebra")
+        target = s.add_message("current", "user", "zebra " + "filler " * 2000)
+        hits = s.fts_search("zebra", scope="session", session_id="current", limit=10)
+        assert ("um_messages", target) in {(h.owner_table, h.owner_id) for h in hits}
+    finally:
+        s.close()
+
+
+def test_fts_owner_scope_not_starved_after_global_limit(tmp_path):
+    """Owner filter must run before the global FTS candidate limit."""
+    s = _store(tmp_path)
+    try:
+        if not s.fts:
+            pytest.skip("FTS5 unavailable")
+        for _ in range(100):
+            s.add_message("s", "user", "zebra", owner="owner-a")
+        target = s.add_message("s", "user", "zebra " + "filler " * 2000,
+                               owner="owner-b")
+        hits = s.fts_search("zebra", scope="all", owner="owner-b", limit=10)
+        assert ("um_messages", target) in {(h.owner_table, h.owner_id) for h in hits}
+    finally:
+        s.close()
+
+
 def test_fts_returns_relevance_order(tmp_path):
     """rank-порядок: короткое точное тело должно обойти длинное размытое."""
     s = _store(tmp_path)

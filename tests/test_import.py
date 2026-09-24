@@ -117,6 +117,25 @@ def test_import_works_without_backend(tmp_path):
         src.close()
 
 
+def test_import_invalidates_existing_pressure_counters(tmp_path):
+    from unified_memory.engine import ActiveWindow
+
+    src = _source(tmp_path)
+    dst = _fresh(tmp_path, "existing.db")
+    try:
+        dump = tmp_path / "existing.jsonl"
+        export_store(src, dump)
+        cfg = _cfg(tmp_path, "existing.db")
+        dst.add_message("s1", "user", "existing message")
+        ActiveWindow(dst, None, cfg).pressure("s1")
+        assert dst.meta_get("raw_tokens:s1") is not None
+        import_dump(dst, dump)
+        assert dst.meta_get("raw_tokens:s1") is None
+    finally:
+        dst.close()
+        src.close()
+
+
 # ---------- legacy single-JSON ----------
 
 def test_legacy_single_json_read(tmp_path):

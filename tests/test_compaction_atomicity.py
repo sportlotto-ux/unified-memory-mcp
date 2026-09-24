@@ -28,7 +28,8 @@ def test_maybe_compact_rolls_back_leaf_when_condense_fails(tmp_path):
     ingest = Ingest(store, None, summarizer, cfg)
     try:
         store.add_summary("s1", "existing summary")
-        store.add_message("s1", "user", "new message")
+        store.add_message("s1", "user", "new message " * 10)
+        store.add_message("s1", "user", "another message " * 10)
         with pytest.raises(RuntimeError, match="condensation failed"):
             ingest.window.maybe_compact("s1")
         assert store.select(
