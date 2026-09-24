@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import base64
 import json
+import os
+import tempfile
 import time
 from pathlib import Path
 
@@ -37,15 +39,25 @@ def _encode_row(cols: list[str], row: tuple) -> dict:
     return d
 
 
+def _reject_database_output(store: Store, out_path: Path) -> None:
+    db_path = Path(store._db_path).expanduser().resolve()
+    protected = {db_path, Path(f"{db_path}-wal"), Path(f"{db_path}-shm")}
+    resolved = out_path.expanduser().resolve()
+    if resolved in protected:
+        raise ValueError("export output must not be the database, WAL, or SHM file")
+
+
 def export_store(store: Store, path: str | Path | None = None) -> dict:
     """JSONL-дамп. Имя по умолчанию: <db>.export-<ts>.jsonl.
 
     Весь проход — под store.read_locked(): консистентный снепшот без гонки с
-    писателями (FastMCP-треды делят один conn). Цена — сериализация писателей
-    на время экспорта; живые большие БД экспортируйте в тишине.
+    писателями (FastMCP-треды делят один conn). Файл сначала пишется во
+    временный файл с mode 0600, затем публикуется через os.replace().
     """
     ts = time.strftime("%Y%m%d-%H%M%S")
     out_path = Path(path) if path else Path(f"{store._db_path}.export-{ts}.jsonl")
+    _reject_database_output(store, out_path)
+    tmp_path: Path | None = None
     with store.read_locked():
         counts = {t: store.conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
                   for t in CONTENT_TABLES}
@@ -54,17 +66,30 @@ def export_store(store: Store, path: str | Path | None = None) -> dict:
                   "exported_at": time.time(), "source_db": store._db_path,
                   "counts": counts}
         written = 0
-        with out_path.open("w", encoding="utf-8") as f:
-            line = json.dumps(header, ensure_ascii=False) + "\n"
-            f.write(line)
-            written += len(line.encode("utf-8"))
-            for t in CONTENT_TABLES:
-                cols = [r[1] for r in store.conn.execute(f"PRAGMA table_info({t})")]
-                for row in store.conn.execute(f"SELECT * FROM {t}"):
-                    line = json.dumps({"table": t, "row": _encode_row(cols, row)},
-                                      ensure_ascii=False) + "\n"
-                    f.write(line)
-                    written += len(line.encode("utf-8"))
+        try:
+            with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", dir=out_path.parent,
+                    prefix=f".{out_path.name}.", suffix=".tmp", delete=False) as f:
+                tmp_path = Path(f.name)
+                line = json.dumps(header, ensure_ascii=False) + "\n"
+                f.write(line)
+                written += len(line.encode("utf-8"))
+                for t in CONTENT_TABLES:
+                    cols = [r[1] for r in store.conn.execute(f"PRAGMA table_info({t})")]
+                    for row in store.conn.execute(f"SELECT * FROM {t}"):
+                        line = json.dumps({"table": t, "row": _encode_row(cols, row)},
+                                          ensure_ascii=False) + "\n"
+                        f.write(line)
+                        written += len(line.encode("utf-8"))
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, out_path)
+        finally:
+            if tmp_path is not None:
+                try:
+                    tmp_path.unlink()
+                except FileNotFoundError:
+                    pass
     return {"path": str(out_path), "bytes": written, "counts": counts,
             "schema_version": header["schema_version"], "format": FORMAT,
             "archive_included": False, "streaming": True}

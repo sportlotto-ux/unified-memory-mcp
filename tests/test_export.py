@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from unified_memory.export import export_store
+
 CONTENT = {"um_messages", "um_summaries", "um_facts", "um_entities",
            "um_edges", "um_links", "um_vectors", "um_meta"}
 
@@ -56,6 +58,26 @@ def test_export_writes_jsonl_readonly(srv):
 def test_export_does_not_require_apply(srv):
     out = json.loads(srv.mem_doctor(mode="export", apply=False))
     assert out["path"].endswith(".jsonl") and out["format"] == "um-export-jsonl"
+
+
+def test_export_rejects_database_path(srv):
+    srv._ingest()
+    store = srv._STATE["store"]
+    before = Path(store._db_path).read_bytes()
+    with pytest.raises(ValueError, match="database"):
+        export_store(store, store._db_path)
+    assert Path(store._db_path).read_bytes() == before
+
+
+def test_export_rejects_symlink_to_database(srv, tmp_path):
+    srv._ingest()
+    store = srv._STATE["store"]
+    alias = tmp_path / "alias.db"
+    alias.symlink_to(store._db_path)
+    before = Path(store._db_path).read_bytes()
+    with pytest.raises(ValueError, match="database"):
+        export_store(store, alias)
+    assert Path(store._db_path).read_bytes() == before
 
 
 def test_export_vectors_base64(srv, tmp_path, monkeypatch):
