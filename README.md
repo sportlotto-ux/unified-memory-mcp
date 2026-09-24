@@ -207,7 +207,7 @@ Derived/unsupported tables остаются в `skipped_fields`; source content 
 ## Разработка
 
 ```bash
-python -m pytest tests/ -q   # текущий dev-прогон: 426 passed, 4 skipped (Python 3.14)
+python -m pytest tests/ -q   # релиз 0.9.0: 426 passed, 4 skipped (Python 3.14 и 3.12)
 ```
 
 Полный suite также прогоняется на Python 3.12; CI дополнительно собирает wheel,

@@ -931,14 +931,14 @@ Validation:
 | P1.5 graph query | done (uncommitted) | — | mem_graph_query with exact edge filters, typed-link rel/min_weight, as_of/liveness, bounded max_hops, owner/session isolation, deterministic edges/links; full suite 360/4 (3.14), 344/7 (3.12); wheel smoke OK |
 | P1.6 migration | done | `5dbf1c6` | LCM + Mnemosyne read-only SQLite adapters: dry-run default, atomic apply, reconciliation + recall checks, LCM source ordering/tool metadata, Mnemosyne fact history/graph/owner mapping, explicit working/episodic policies, skipped-field report; full suite 369/4 (3.14), 353/7 (3.12), wheel smoke OK |
 | P2.1 working TTL | done | `bc2aec3` | working slot-fact TTL, lazy expiry through existing vector/FTS lifecycle, opt-in bounded assembly, owner semantics preserved; full suite 375/4 (3.14), 359/7 (3.12), wheel smoke OK |
-| P2.2 annotations | done (uncommitted) | — | um_annotations metadata-only layer, mem_annotate/mem_get/mem_forget, cascade + export/import remap, recall invariant; full suite 382/4 (3.14), wheel smoke OK |
-| P2.3 validate | done (uncommitted) | — | run_validate + mem_validate read-only collation (cite/conflicts/live links/annotations), verdict-free, no new tables/config; full suite 388/4 (3.14), wheel smoke OK |
-| P2.4 tasks | done (uncommitted) | — | mem_task over category="task" slots, status machine in metadata_json, supersede carry-over, no new tables, recall invariant; full suite 394/4 (3.14), wheel smoke OK |
-| P2.5 persona | done (uncommitted) | — | mem_persona set/get over category="persona" slots, bounded ordered profile, no new tables, upstream persona stays not_in_scope; full suite 400/4 (3.14), wheel smoke OK |
-| P2.6 extract | done (uncommitted) | — | EndpointExtractor + mem_extract preview-only (strict JSON, caps, no writes), reuse UM_SUMMARIZER_*, loud errors, no new tables/config; full suite 406/4 (3.14), wheel smoke OK |
-| P2.7 banks | done (uncommitted) | — | um_facts.bank + um_grants read-only sharing, visibility on recall/get/expand/evidence, slot+index migration, legacy preserved; full suite 414/4 (3.14), wheel smoke OK |
-| P2.8 adaptive | done (uncommitted) | — | per-call importance/mmr/scope-bias overrides on recall+mem_recall, effective in diagnostics, defaults bitwise; full suite 420/4 (3.14), wheel smoke OK |
-| P2.9 pack | done (uncommitted) | — | mem_evidence(mode=pack): per-ref cite/links/annotations + global conflicts, explicit refs, bad_ref without throw, no new tables/config; full suite 426/4 (3.14), wheel smoke OK |
+| P2.2 annotations | done | `fdcf3d3` | um_annotations metadata-only layer, mem_annotate/mem_get/mem_forget, cascade + export/import remap, recall invariant; full suite 382/4 (3.14), wheel smoke OK |
+| P2.3 validate | done | `e5b93ad` | run_validate + mem_validate read-only collation (cite/conflicts/live links/annotations), verdict-free, no new tables/config; full suite 388/4 (3.14), wheel smoke OK |
+| P2.4 tasks | done | `1923246` | mem_task over category="task" slots, status machine in metadata_json, supersede carry-over, no new tables, recall invariant; full suite 394/4 (3.14), wheel smoke OK |
+| P2.5 persona | done | `24fc8b7` | mem_persona set/get over category="persona" slots, bounded ordered profile, no new tables, upstream persona stays not_in_scope; full suite 400/4 (3.14), wheel smoke OK |
+| P2.6 extract | done | `c462fd6` | EndpointExtractor + mem_extract preview-only (strict JSON, caps, no writes), reuse UM_SUMMARIZER_*, loud errors, no new tables/config; full suite 406/4 (3.14), wheel smoke OK |
+| P2.7 banks | done | `244cdc7` | um_facts.bank + um_grants read-only sharing, visibility on recall/get/expand/evidence, slot+index migration, legacy preserved; full suite 414/4 (3.14), wheel smoke OK |
+| P2.8 adaptive | done | `c6adf72` | per-call importance/mmr/scope-bias overrides on recall+mem_recall, effective in diagnostics, defaults bitwise; full suite 420/4 (3.14), wheel smoke OK |
+| P2.9 pack | done | `a964e30` | mem_evidence(mode=pack): per-ref cite/links/annotations + global conflicts, explicit refs, bad_ref without throw, no new tables/config; full suite 426/4 (3.14+3.12), wheel smoke OK |
 
 ## 9. Final gate
 

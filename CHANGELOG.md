@@ -3,7 +3,7 @@
 Все значимые изменения. Формат близок к Keep a Changelog; версии — SemVer.
 Ранние версии (0.1–0.3) сжаты: это была внутренняя сборка до публикации.
 
-## [Unreleased] — 0.9.0 development
+## [0.9.0] — 2026-09-24
 ### Added
 - P1.1–P1.5 parity additions: metadata inspection, lineage, archive recall,
   bounded importance ranking, and `mem_graph_query`.
