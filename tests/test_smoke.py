@@ -14,7 +14,7 @@ TOOLS = {
     "mem_remember", "mem_fact", "mem_annotate", "mem_link", "mem_graph_query",
     "mem_recall", "mem_expand",
     "mem_update", "mem_compact", "mem_assemble", "mem_forget", "mem_reindex",
-    "mem_recent", "mem_evidence", "mem_validate", "mem_task", "mem_persona", "mem_batch", "mem_get", "mem_inspect",
+    "mem_recent", "mem_evidence", "mem_validate", "mem_task", "mem_persona", "mem_extract", "mem_batch", "mem_get", "mem_inspect",
     "mem_load_session", "mem_status", "mem_doctor",
 }
 

@@ -71,7 +71,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 }
 ```
 
-## Тулы (23)
+## Тулы (24)
 
 | Тул | Что делает |
 |---|---|
@@ -81,6 +81,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 | `mem_validate` | Read-only collation проверки одного ref: `cite` (если передан `claim`) + `conflicts` (цель + прямые соседи по живым `supports`/`contradicts`) + живые `supports`/`contradicts`-связи + пометки; вердикта нет, `needs_judgment: true` всегда |
 | `mem_task` | Прогресс задач поверх слот-фактов `category="task"`: `create` (имя+тело → `open`) \\| `status` (машина `open/doing/blocked/done`, из `done` только в `open`) \\| `list` (живые задачи, фильтр по статусу); повтор живого имени — отказ |
 | `mem_persona` | Профиль агента поверх слотов `category="persona"`: `set` (трейт+тело → `created/superseded/noop`) \\| `get` (весь живой профиль `{trait: body}`, сортировка по имени, cap `limit`); удаление — `mem_forget(kind=fact)` |
+| `mem_extract` | Preview триплетов для одного ref (`{subject, predicate, object}`, cap 20, поля cap 200); записи нет — подтверждение через `mem_fact`/`mem_link`; требует `UM_SUMMARIZER_URL/MODEL`, без них явная ошибка без сети |
 | `mem_link` | Типизированная связь (`src`/`dst` как `fact:3`/`message:12`, `rel` ∈ `supports`/`contradicts`/`supersedes`/`derives_from`). Оба конца обязаны существовать и принадлежать `owner`; повтор живой связи — no-op с тем же id |
 | `mem_graph_query` | Bounded graph traversal: exact `subject`/`predicate`/`object` для entity edges, `rel`/`min_weight` для typed links, `as_of`, `max_hops`, owner/session/liveness isolation; deterministic `edges`/`links` result |
 | `mem_batch` | Атомарный батч записей (all-or-nothing): ops `remember_fact` \| `update` (fact/edge/link) \| `forget` (fact/edge/link). `dry_run=true` — валидация с откатом. Без кросс-ссылок; каждый op в savepoint; текст идёт через redaction-гейт |
@@ -205,7 +206,7 @@ Derived/unsupported tables остаются в `skipped_fields`; source content 
 ## Разработка
 
 ```bash
-python -m pytest tests/ -q   # текущий dev-прогон: 400 passed, 4 skipped (Python 3.14)
+python -m pytest tests/ -q   # текущий dev-прогон: 406 passed, 4 skipped (Python 3.14)
 ```
 
 Полный suite также прогоняется на Python 3.12; CI дополнительно собирает wheel,

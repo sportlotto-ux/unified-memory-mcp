@@ -306,7 +306,6 @@ def _empty_conflicts() -> dict:
     return {"mode": "conflicts", "candidates": [], "count": 0,
             "needs_judgment": True, "rejections": []}
 
-
 def run_validate(store, target: str, claim: str = "", owner: str = "",
                  max_refs: int = 50, max_chars: int = 8000,
                  partial: float = 0.5, max_neighbours: int = 20,
@@ -352,3 +351,26 @@ def run_validate(store, target: str, claim: str = "", owner: str = "",
             "links": links_out,
             "annotations": details.get("annotations", []),
             "needs_judgment": True}
+
+
+def run_extract(store, target: str, owner: str = "",
+                max_refs: int = 50, max_chars: int = 8000,
+                archived_fetch: Callable[[str, int], str | None] | None = None) -> dict:
+    """P2.6: preview триплетов для одного ref. Записи нет.
+
+    Цель валидируется до сети и до проверки endpoint; без настроенного
+    UM_SUMMARIZER_URL/MODEL — ValueError, ноль HTTP.
+    """
+    table, tid = parse_ref(target)  # ValueError на мусор — до всего
+    target_str = f"{_SHORT[table]}:{tid}"
+    rows, rejections = _resolve(store, [target_str], owner, max_refs,
+                                max_chars, archived_fetch)
+    if rejections or not rows:
+        reason = (rejections[0].get("reason_code", "not_found")
+                  if rejections else "not_found")
+        raise ValueError(f"cannot extract {target_str}: {reason}")
+    from .summarize import EndpointExtractor
+    ext = EndpointExtractor()
+    candidates = ext.extract([rows[0][1]])
+    return {"target": target_str, "candidates": candidates,
+            "count": len(candidates), "model": ext.model}

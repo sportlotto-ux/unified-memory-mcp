@@ -108,3 +108,78 @@ def default_summarizer() -> Summarizer:
     if os.environ.get("UM_SUMMARIZER_URL") and os.environ.get("UM_SUMMARIZER_MODEL"):
         return EndpointSummarizer()
     return ExtractiveSummarizer()
+
+
+_EXTRACT_MAX_CHARS = 12000
+_EXTRACT_MAX_TRIPLES = 20
+_EXTRACT_MAX_FIELD = 200
+
+
+class EndpointExtractor:
+    """P2.6: preview триплетов через тот же OpenAI-совместимый endpoint.
+
+    Те же UM_SUMMARIZER_URL/MODEL/API_KEY, те же громкие ошибки. Записи нет:
+    возвращает кандидатов, хост подтверждает через mem_fact/mem_link.
+    """
+
+    def __init__(self, url: str = "", model: str = "", timeout: int = 60) -> None:
+        self.url = url or os.environ.get("UM_SUMMARIZER_URL", "")
+        self.model = model or os.environ.get("UM_SUMMARIZER_MODEL", "")
+        self.timeout = timeout
+        if not self.url or not self.model:
+            raise ValueError("UM_SUMMARIZER_URL and UM_SUMMARIZER_MODEL are required")
+
+    def extract(self, texts: list[str]) -> list[dict]:
+        joined = "\n\n".join(texts)
+        if len(joined) > _EXTRACT_MAX_CHARS:
+            joined = joined[:_EXTRACT_MAX_CHARS] + "\n…[truncated for endpoint]"
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system",
+                 "content": "Extract subject-predicate-object triples. Reply with "
+                            "a JSON array only, no preamble: "
+                            '[{"subject": ..., "predicate": ..., "object": ...}]. '
+                            "Keep names verbatim, predicates short snake_case."},
+                {"role": "user", "content": joined},
+            ],
+            "temperature": 0.1,
+        }
+        req = urllib.request.Request(
+            self.url.rstrip("/") + "/chat/completions",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json", **_auth_header()},
+        )
+        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            data = json.loads(resp.read().decode())
+        try:
+            content = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as e:
+            raise ValueError(
+                f"extractor endpoint returned no content: {data!r:.200}") from e
+        if not content or not content.strip():
+            raise ValueError("extractor endpoint returned empty content")
+        try:
+            items = json.loads(content)
+        except ValueError as e:
+            raise ValueError(
+                f"extractor endpoint returned non-JSON: {content[:200]!r}") from e
+        if not isinstance(items, list):
+            raise ValueError(
+                f"extractor endpoint must return a JSON array, got: {content[:200]!r}")
+        out = []
+        for item in items[:_EXTRACT_MAX_TRIPLES]:
+            if not isinstance(item, dict):
+                raise ValueError(
+                    f"extractor triple must be an object, got: {item!r:.120}")
+            try:
+                triple = {k: str(item[k]).strip()[:_EXTRACT_MAX_FIELD]
+                          for k in ("subject", "predicate", "object")}
+            except KeyError as e:
+                raise ValueError(
+                    f"extractor triple misses key {e}: {item!r:.120}") from e
+            if not all(triple.values()):
+                raise ValueError(
+                    f"extractor triple has empty field: {item!r:.120}")
+            out.append(triple)
+        return out

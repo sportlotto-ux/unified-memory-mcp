@@ -656,6 +656,61 @@ owner isolation + legacy, redaction, export/import профиля + bound лим
 **Validation:** полный suite на Python 3.14 и 3.12, `git diff --check`, wheel
 build/install/import smoke из clean venv.
 
+## 5.6 P2.6 — Extraction (endpoint preview, no auto-write)
+
+**Use case:** агент просит предложить триплеты `(subject, predicate, object)`
+для одного ref (факт/сообщение/саммари/ребро), смотрит кандидатов и сам
+решает, что писать через `mem_fact`/`mem_link`. Ручной разбор тел больше
+не нужен, судья остаётся хостом.
+
+**Проблема:** граф пополняется только руками: агент сам парсит тела и сам
+печатает триплеты; опечатки и несогласованные предикаты расползаются.
+
+**Пользовательский эффект:** `mem_extract(target, owner="")` →
+`{target, candidates: [{subject, predicate, object}], count, model}`.
+Записи нет: ни фактов, ни рёбер, ни векторов. Без настроенного endpoint —
+явная ошибка, не молчаливый fallback и не эвристика.
+
+**Scope:**
+
+- `EndpointExtractor` в `summarize.py`, те же `UM_SUMMARIZER_URL` /
+  `UM_SUMMARIZER_MODEL` / `UM_SUMMARIZER_API_KEY`, тот же стиль ошибок;
+- промпт требует strict JSON-список; не-JSON/не-список от endpoint —
+  `ValueError`; кап 20 кандидатов, поля trim + cap 200 chars;
+- цель — один ref через `parse_ref` + `_resolve` (owner/archive как
+  в `mem_evidence`); чужая/битая/несуществующая — `ValueError` до сети;
+- один новый тул `mem_extract` (ro, non-idempotent: внешний LLM);
+- входной текст cap 12000 chars (как у `EndpointSummarizer`).
+
+**Non-goals:**
+
+- автозапись кандидатов (хост подтверждает через `mem_fact`/`mem_link`);
+- офлайн-эвристика извлечения (шум = галлюцинации в сторе);
+- новые `UM_*` knobs (reuse `UM_SUMMARIZER_*`), новые таблицы;
+- batch extract по нескольким refs (один вызов — один ref);
+- влияние на recall/assemble ranking, смена migration policy.
+
+**Красные тесты** (`tests/test_extract.py`, 6 шт.): нет endpoint → отказ
+без сети; стаб `urlopen` → кандидаты дословно; мусор от endpoint → отказ;
+bad ref/чужой/битый id → отказ до сети; капы (20 штук, 200 chars);
+read-only (счётчики строк стора бит-в-бит).
+
+**Acceptance criteria:**
+
+- без `UM_SUMMARIZER_URL/MODEL` — `ValueError`, ноль HTTP;
+- пустой ответ endpoint — `ValueError`, не `[]`-маскировка;
+- каждый кандидат — ровно `{subject, predicate, object}` строками;
+- default ranking, legacy owner semantics, archive behavior не меняются.
+
+**Rollback/failure behavior:** pure preview: ни одной записи при любом
+исходе; отказ до сети на невалидной цели; сетевые/парсинг-ошибки — громко.
+
+**Docs/config impact:** `README.md` (24 тула), `CHANGELOG.md`, status log;
+новых `UM_*`, миграций, изменений `IMPORT.md` нет.
+
+**Validation:** полный suite на Python 3.14 и 3.12, `git diff --check`, wheel
+build/install/import smoke из clean venv.
+
 ## 6. Story template
 
 Каждая story должна иметь этот блок до начала кода:
@@ -704,6 +759,7 @@ Validation:
 | P2.3 validate | done (uncommitted) | — | run_validate + mem_validate read-only collation (cite/conflicts/live links/annotations), verdict-free, no new tables/config; full suite 388/4 (3.14), wheel smoke OK |
 | P2.4 tasks | done (uncommitted) | — | mem_task over category="task" slots, status machine in metadata_json, supersede carry-over, no new tables, recall invariant; full suite 394/4 (3.14), wheel smoke OK |
 | P2.5 persona | done (uncommitted) | — | mem_persona set/get over category="persona" slots, bounded ordered profile, no new tables, upstream persona stays not_in_scope; full suite 400/4 (3.14), wheel smoke OK |
+| P2.6 extract | done (uncommitted) | — | EndpointExtractor + mem_extract preview-only (strict JSON, caps, no writes), reuse UM_SUMMARIZER_*, loud errors, no new tables/config; full suite 406/4 (3.14), wheel smoke OK |
 
 ## 9. Final gate
 

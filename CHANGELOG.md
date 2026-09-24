@@ -25,6 +25,8 @@
 - P2.5: `mem_persona` profile over `category="persona"` slots (set upsert +
   bounded ordered get); no new tables, upstream `memoria_persona` stays
   `not_in_scope`.
+- P2.6: `mem_extract` endpoint preview of triples for one ref (strict JSON,
+  caps, no writes); reuses `UM_SUMMARIZER_*`, explicit error without endpoint.
 - Migration metadata columns for source references, confidence, veracity, and
   tool metadata; export/import and `mem_get` preserve them.
 

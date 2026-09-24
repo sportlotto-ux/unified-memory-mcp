@@ -2,7 +2,7 @@
 
 Tools: mem_remember mem_fact mem_annotate mem_link mem_graph_query mem_recall
        mem_expand mem_get mem_inspect mem_compact mem_forget mem_status mem_doctor
-       mem_validate mem_task mem_persona
+       mem_validate mem_task mem_persona mem_extract
 
 Run: python -m unified_memory.server  (stdio transport)
 """
@@ -32,7 +32,8 @@ from unified_memory.summarize import default_summarizer  # noqa: E402
 from unified_memory import archive  # noqa: E402
 from unified_memory.recent import parse_as_of, parse_period, parse_when  # noqa: E402
 from unified_memory.evidence import (  # noqa: E402
-    parse_ref, run_cite, run_compute, run_conflicts, run_validate)
+    parse_ref, run_cite, run_compute, run_conflicts, run_extract,
+    run_validate)
 
 mcp = _Server("unified-memory")
 
@@ -592,6 +593,21 @@ def mem_persona(op: str = "get", trait: str = "", body: str = "",
         return json.dumps({"traits": traits, "count": len(traits)},
                           ensure_ascii=False)
     raise ValueError(f"unknown op {op!r}: set | get")
+
+
+@mcp.tool(annotations=_ann(ro=True))
+def mem_extract(target: str, owner: str = "") -> str:
+    """Propose triples for one ref (P2.6, preview only): {target, candidates,
+    count, model}. No writes — confirm via mem_fact/mem_link. Needs
+    UM_SUMMARIZER_URL/MODEL (same endpoint as EndpointSummarizer);
+    without it an explicit error, no network. target like 'fact:3'."""
+    _ingest()
+    cfg = _STATE["cfg"]
+    out = run_extract(_STATE["store"], target, owner=owner,
+                      max_refs=cfg.evidence_max_refs,
+                      max_chars=cfg.evidence_max_chars,
+                      archived_fetch=_archive_fetch(cfg))
+    return json.dumps(out, ensure_ascii=False)
 
 
 @mcp.tool(annotations=_ann())
