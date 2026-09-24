@@ -300,13 +300,7 @@ class Store:
             self.conn.execute("UPDATE um_entities SET display=name WHERE display=''")
             self.conn.commit()
         # v0.4-п.2: owner-колонки. '' = legacy без изоляции, поведение не меняется.
-        for t in ("um_messages", "um_summaries", "um_facts",
-                  "um_edges", "um_vectors"):
-            cols = [r[1] for r in self.conn.execute(f"PRAGMA table_info({t})")]
-            if "owner" not in cols:
-                self.conn.execute(
-                    f"ALTER TABLE {t} ADD COLUMN owner TEXT NOT NULL DEFAULT ''")
-                self.conn.commit()
+        self._migrate_owner_columns()
         self._migrate_entity_owner()
         # v0.5: valid_until (sentinel 0 = живое) + superseded_by на фактах.
         fcols = [r[1] for r in self.conn.execute("PRAGMA table_info(um_facts)")]
@@ -407,6 +401,30 @@ class Store:
             self.conn.execute("DROP TABLE um_entities")
             self.conn.execute(
                 "ALTER TABLE um_entities_new RENAME TO um_entities")
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def _migrate_owner_columns(self) -> None:
+        """Add legacy owner columns as one resumable schema transaction."""
+        tables = ("um_messages", "um_summaries", "um_facts",
+                  "um_edges", "um_vectors")
+        pending = [
+            table for table in tables
+            if "owner" not in {
+                row[1] for row in self.conn.execute(
+                    f"PRAGMA table_info({table})")
+            }
+        ]
+        if not pending:
+            return
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            for table in pending:
+                self.conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN owner "
+                    "TEXT NOT NULL DEFAULT ''")
             self.conn.commit()
         except Exception:
             self.conn.rollback()

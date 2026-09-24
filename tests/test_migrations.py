@@ -238,3 +238,38 @@ def test_orphan_link_staging_is_promoted_before_schema_create(tmp_path):
         ).fetchall() == [(7, "um_facts", 1, "um_messages", 2, "alice")]
     finally:
         store.close()
+
+
+def test_owner_column_migration_is_atomic(tmp_path):
+    path = tmp_path / "owner-migration.db"
+    conn = sqlite3.connect(path)
+    tables = ("um_messages", "um_summaries", "um_facts", "um_edges", "um_vectors")
+    for table in tables:
+        conn.execute(f"CREATE TABLE {table}(id INTEGER PRIMARY KEY)")
+        conn.execute(f"INSERT INTO {table}(id) VALUES(1)")
+    conn.commit()
+
+    def deny_alter(action, arg1, arg2, db, source):
+        if action == sqlite3.SQLITE_ALTER_TABLE and arg2 == "um_edges":
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    conn.set_authorizer(deny_alter)
+    store = object.__new__(Store)
+    store.conn = conn
+    try:
+        with pytest.raises(sqlite3.DatabaseError):
+            store._migrate_owner_columns()
+        for table in tables:
+            cols = {row[1] for row in conn.execute(
+                f"PRAGMA table_info({table})")}
+            assert "owner" not in cols
+
+        conn.set_authorizer(None)
+        store._migrate_owner_columns()
+        for table in tables:
+            cols = {row[1] for row in conn.execute(
+                f"PRAGMA table_info({table})")}
+            assert "owner" in cols
+    finally:
+        conn.close()
