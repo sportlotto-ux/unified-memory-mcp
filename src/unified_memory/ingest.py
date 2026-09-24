@@ -43,17 +43,28 @@ class Ingest:
         if not (content or "").strip():
             raise ValueError("empty content: nothing to remember")
         content = self._clean(content)
-        mid = self.store.add_message(session_id, role, content, source, owner,
-                                     _commit=_commit)
-        if self.backend is not None:
-            self.store.add_vector("um_messages", mid,
-                                  self.backend.embed_docs([content])[0],
-                                  self.backend.model_name, owner, _commit=_commit)
+        if _commit:
+            with self.store.transaction():
+                mid = self._remember_message_write(
+                    session_id, role, content, source, owner)
+        else:
+            mid = self._remember_message_write(
+                session_id, role, content, source, owner)
         # В batch (_commit=False) компакшн откладывается и делается один раз в конце
         # (guardrail 3): иначе N прогонов по частичному состоянию батча.
         compaction = (self.window.maybe_compact(session_id, owner)
                       if _commit else {"status": "deferred"})
         return {"id": mid, "compaction": compaction}
+
+    def _remember_message_write(self, session_id: str, role: str, content: str,
+                                source: str, owner: str) -> int:
+        mid = self.store.add_message(session_id, role, content, source, owner,
+                                     _commit=False)
+        if self.backend is not None:
+            self.store.add_vector("um_messages", mid,
+                                  self.backend.embed_docs([content])[0],
+                                  self.backend.model_name, owner, _commit=False)
+        return mid
 
     def remember_fact(self, category: str, name: str, body: str,
                       importance: float = 0.5, subject: str = "",
@@ -78,28 +89,42 @@ class Ingest:
         """
         name, body = self._clean(name), self._clean(body)
         subject, predicate, obj = (self._clean(s) for s in (subject, predicate, obj))
+        if _commit:
+            with self.store.transaction():
+                out = self._upsert_fact_write(
+                    category, name, body, importance, subject, predicate, obj,
+                    session_id, owner)
+        else:
+            out = self._upsert_fact_write(
+                category, name, body, importance, subject, predicate, obj,
+                session_id, owner)
+        return out
+
+    def _upsert_fact_write(self, category: str, name: str, body: str,
+                           importance: float, subject: str, predicate: str,
+                           obj: str, session_id: str, owner: str) -> dict:
         out = self.store.add_fact_ex(category, name, body, importance, owner,
-                                     _commit=_commit)
+                                     _commit=False)
         fid = out["id"]
         if out["status"] in ("noop", "updated"):
             return out
-        self._embed_fact(fid, _commit=_commit)
+        self._embed_fact(fid, _commit=False)
         if subject and predicate and obj:
             eid = self.store.add_edge(subject, predicate, obj, session_id,
-                                      fact_id=fid, owner=owner, _commit=_commit)
+                                      fact_id=fid, owner=owner, _commit=False)
             if self.backend is not None:
                 self.store.add_vector(
                     "um_edges", eid,
                     self.backend.embed_docs([f"{subject} {predicate} {obj}"])[0],
-                    self.backend.model_name, owner, _commit=_commit)
+                    self.backend.model_name, owner, _commit=False)
                 for ent in (subject, obj):
-                    ent_id = self.store.add_entity(ent, owner, _commit=_commit)
+                    ent_id = self.store.add_entity(ent, owner, _commit=False)
                     if self.store.has_vector("um_entities", ent_id):
                         continue  # имя то же — вектор тот же, CPU не жжём
                     self.store.add_vector(
                         "um_entities", ent_id,
                         self.backend.embed_docs([ent])[0],
-                        self.backend.model_name, owner, _commit=_commit)
+                        self.backend.model_name, owner, _commit=False)
         return out
 
     def _embed_fact(self, fid: int, _commit: bool = True) -> None:
@@ -121,13 +146,25 @@ class Ingest:
         """Правка факта через Ingest: после store.update_fact переэмбеддить
         новую версию (superseded) или reopened факт — иначе он слеп для
         вектор-плеча (P4.8 удалил вектор при expire)."""
+        if _commit:
+            with self.store.transaction():
+                out = self._update_fact_write(
+                    fid, body, importance, valid_until, owner)
+        else:
+            out = self._update_fact_write(
+                fid, body, importance, valid_until, owner)
+        return out
+
+    def _update_fact_write(self, fid: int, body: str | None,
+                           importance: float | None, valid_until: float | None,
+                           owner: str) -> dict | None:
         out = self.store.update_fact(fid, body=body, importance=importance,
                                      valid_until=valid_until, owner=owner,
-                                     _commit=_commit)
+                                     _commit=False)
         if out is None:
             return None
         if out["status"] in ("superseded", "reopened"):
-            self._embed_fact(out["id"], _commit=_commit)
+            self._embed_fact(out["id"], _commit=False)
         return out
 
     def batch(self, ops: list[dict], dry_run: bool = False,
