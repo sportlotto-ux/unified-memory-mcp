@@ -1,7 +1,7 @@
 """MCP server: unified memory for Hermes / Claude Code / any MCP client.
 
-Tools: mem_remember mem_fact mem_recall mem_expand mem_get mem_inspect
-       mem_compact mem_forget mem_status mem_doctor
+Tools: mem_remember mem_fact mem_link mem_graph_query mem_recall mem_expand
+       mem_get mem_inspect mem_compact mem_forget mem_status mem_doctor
 
 Run: python -m unified_memory.server  (stdio transport)
 """
@@ -164,6 +164,37 @@ def mem_link(src: str, dst: str, rel: str, weight: float = 1.0,
 
 
 @mcp.tool(annotations=_ann(ro=True, idem=True))
+def mem_graph_query(subject: str = "", predicate: str = "", object: str = "",
+                    rel: str = "", min_weight: float = 0.0,
+                    max_hops: int = 1, limit: int = 100,
+                    owner: str = "", session_id: str = "",
+                    include_expired: bool = False, as_of: str = "") -> str:
+    """Bounded graph traversal over entity edges and typed links.
+
+    subject/predicate/object are exact (case-insensitive) entity-edge filters;
+    rel/min_weight filter typed links. as_of selects a validity slice, while
+    include_expired exposes historical liveness. owner/session are hard scopes.
+    """
+    _ingest()
+    cfg = _STATE["cfg"]
+    if max_hops < 1:
+        raise ValueError("max_hops must be >= 1")
+    if max_hops > cfg.recall_max_hops:
+        raise ValueError(
+            f"max_hops={max_hops} exceeds UM_RECALL_MAX_HOPS={cfg.recall_max_hops}")
+    if limit < 1 or limit > 500:
+        raise ValueError("limit must be between 1 and 500")
+    if min_weight < 0:
+        raise ValueError("min_weight must be >= 0")
+    as_of_ts = parse_as_of(as_of) if as_of else None
+    out = _store().graph_query(
+        subject=subject, predicate=predicate, object=object, session_id=session_id,
+        owner=owner, rel=rel, min_weight=min_weight, max_hops=max_hops,
+        include_expired=include_expired, as_of=as_of_ts, limit=limit)
+    return json.dumps(out, ensure_ascii=False)
+
+
+@mcp.tool(annotations=_ann(ro=True, idem=True))
 def mem_recall(query: str, scope: str = "all", session_id: str = "",
                limit: int = 10, owner: str = "",
                include_expired: bool = False, as_of: str = "",
@@ -179,7 +210,9 @@ def mem_recall(query: str, scope: str = "all", session_id: str = "",
     source dimension и исключаются из такого recall.
     include_archived=true добавляет bounded lexical search по cold archive;
     default false сохраняет hot-only recall.
-    diagnostics=true → {"hits": [...], "diagnostics": {arms/contrib/timings/bfs/degraded}};
+    bounded importance component для facts включается конфигом UM_IMPORTANCE_WEIGHT;
+    default 0 сохраняет legacy ranking, diagnostics показывает factor contribution.
+    diagnostics=true → {"hits": [...], "diagnostics": {arms/contrib/timings/bfs/importance/degraded}};
     false — ровно прежний список (аддитивность)."""
     ing = _ingest()
     cfg = _STATE["cfg"]

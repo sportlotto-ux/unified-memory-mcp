@@ -1572,6 +1572,19 @@ class Store:
         }
 
     @_locked
+    def importance_for(self, refs: list[tuple[str, int]]) -> dict[tuple[str, int], float]:
+        """Batch fact importance values for optional recall ranking."""
+        ids = [oid for ot, oid in refs if ot == "um_facts"]
+        if not ids:
+            return {}
+        ph = ",".join("?" * len(ids))
+        return {
+            ("um_facts", oid): max(0.0, min(1.0, float(importance)))
+            for oid, importance in self.conn.execute(
+                f"SELECT id, importance FROM um_facts WHERE id IN ({ph})", ids)
+        }
+
+    @_locked
     def recent(self, start_ts: float, end_ts: float, session_id: str = "",
                owner: str = "", limit: int = 20,
                before_ts: float = 0.0, before_id: int = 0,
@@ -2060,17 +2073,17 @@ class Store:
     @_locked
     def link_neighbors(self, table: str, oid: int, owner: str = "",
                        include_expired: bool = False, as_of: float | None = None,
-                       rel: str = "", session_id: str = "",
-                       limit: int = 20) -> list[dict]:
+                       rel: str = "", min_weight: float = 0.0,
+                       session_id: str = "", limit: int = 20) -> list[dict]:
         """Соседи узла по um_links в ОБЕ стороны (ADR-001 D5). Не более limit
         на направление. Liveness линка проверяется здесь; узла-назначения — вызывающим."""
         now = time.time()
         out: list[dict] = []
-        dirs = (("src_table=? AND src_id=?",
-                 "dst_table, dst_id, rel, weight, session_id, created_at, valid_until"),
-                ("dst_table=? AND dst_id=?",
-                 "src_table, src_id, rel, weight, session_id, created_at, valid_until"))
-        for where, cols in dirs:
+        dirs = (("out", "src_table=? AND src_id=?",
+                 "id, dst_table, dst_id, rel, weight, session_id, created_at, valid_until"),
+                ("in", "dst_table=? AND dst_id=?",
+                 "id, src_table, src_id, rel, weight, session_id, created_at, valid_until"))
+        for direction, where, cols in dirs:
             q = f"SELECT {cols} FROM um_links WHERE {where}"
             p: list = [table, oid]
             if owner:
@@ -2079,19 +2092,28 @@ class Store:
             if rel:
                 q += " AND rel=?"
                 p.append(rel)
+            if min_weight:
+                q += " AND weight>=?"
+                p.append(float(min_weight))
             if session_id:
                 q += " AND session_id=?"
                 p.append(session_id)
             q += " ORDER BY id"
             got = 0
-            for nt, nid, rl, w, sid, ca, vu in self.conn.execute(q, p):
+            for lid, nt, nid, rl, w, sid, ca, vu in self.conn.execute(q, p):
                 if as_of is not None:
                     if not (ca <= as_of and (vu == 0 or vu > as_of)):
                         continue
                 elif not include_expired and not (vu == 0 or vu > now):
                     continue
-                out.append({"table": nt, "id": nid, "rel": rl, "weight": w,
-                            "session_id": sid or "", "created_at": ca})
+                if direction == "out":
+                    src_table, src_id, dst_table, dst_id = table, oid, nt, nid
+                else:
+                    src_table, src_id, dst_table, dst_id = nt, nid, table, oid
+                out.append({"link_id": lid, "table": nt, "id": nid, "rel": rl, "weight": w,
+                            "session_id": sid or "", "created_at": ca,
+                            "src_table": src_table, "src_id": src_id,
+                            "dst_table": dst_table, "dst_id": dst_id})
                 got += 1
                 if got >= limit:
                     break
@@ -2104,30 +2126,37 @@ class Store:
                              predicate: str = "", limit: int = 100) -> list[dict]:
         """Шаг BFS по entity-графу: рёбра сущности + id второго конца."""
         now = time.time()
-        q = ("SELECT id, subject_id, object_id, predicate, session_id, created_at,"
-             " valid_until FROM um_edges WHERE (subject_id=? OR object_id=?)")
+        q = ("SELECT e.id, e.subject_id, e.object_id, e.predicate,"
+             " e.session_id, e.created_at, e.valid_until, e.fact_id,"
+             " s.name, o.name"
+             " FROM um_edges e"
+             " JOIN um_entities s ON s.id=e.subject_id"
+             " JOIN um_entities o ON o.id=e.object_id"
+             " WHERE (e.subject_id=? OR e.object_id=?)")
         p: list = [eid, eid]
         if owner:
-            q += " AND owner=?"
+            q += " AND e.owner=?"
             p.append(owner)
         if session_id:
-            q += " AND session_id=?"
+            q += " AND e.session_id=?"
             p.append(session_id)
         if predicate:
-            q += " AND predicate=?"
+            q += " AND e.predicate=?"
             p.append(predicate)
-        q += " ORDER BY id LIMIT ?"
+        q += " ORDER BY e.id LIMIT ?"
         p.append(limit)
         out = []
-        for eid2, s, o, pred, sid, ca, vu in self.conn.execute(q, p):
+        for eid2, sub_id, obj_id, pred, sid, ca, vu, fid, sub, obj \
+                in self.conn.execute(q, p):
             if as_of is not None:
                 if not (ca <= as_of and (vu == 0 or vu > as_of)):
                     continue
             elif not include_expired and not (vu == 0 or vu > now):
                 continue
-            out.append({"edge_id": eid2, "other_id": o if s == eid else s,
+            out.append({"edge_id": eid2, "other_id": obj_id if sub_id == eid else sub_id,
                         "predicate": pred, "session_id": sid or "",
-                        "created_at": ca})
+                        "created_at": ca, "fact_id": fid,
+                        "subject": sub, "object": obj})
         return out
 
     @_locked
@@ -2160,6 +2189,175 @@ class Store:
                 if eid not in out:
                     out.append(eid)
         return out[:limit]
+
+    @_locked
+    def graph_edges(self, subject: str = "", predicate: str = "",
+                    object_name: str = "", session_id: str = "",
+                    owner: str = "", include_expired: bool = False,
+                    as_of: float | None = None, limit: int = 100) -> list[dict]:
+        """Exact-filter entity edges in deterministic id order."""
+        now = time.time()
+        q = ("SELECT e.id, e.subject_id, e.object_id, e.predicate,"
+             " e.session_id, e.owner, e.created_at, e.valid_until, e.fact_id,"
+             " s.name, o.name"
+             " FROM um_edges e"
+             " JOIN um_entities s ON s.id=e.subject_id"
+             " JOIN um_entities o ON o.id=e.object_id"
+             " WHERE 1=1")
+        params: list = []
+        if subject:
+            q += " AND s.name=?"
+            params.append(subject.strip().lower())
+        if predicate:
+            q += " AND e.predicate=?"
+            params.append(predicate.strip().lower())
+        if object_name:
+            q += " AND o.name=?"
+            params.append(object_name.strip().lower())
+        if session_id:
+            q += " AND e.session_id=?"
+            params.append(session_id)
+        if owner:
+            q += " AND e.owner=?"
+            params.append(owner)
+        if as_of is not None:
+            q += " AND e.created_at<=? AND (e.valid_until=0 OR e.valid_until>?)"
+            params.extend([as_of, as_of])
+        elif not include_expired:
+            q += " AND (e.valid_until=0 OR e.valid_until>?)"
+            params.append(now)
+        q += " ORDER BY e.id LIMIT ?"
+        params.append(int(limit))
+        keys = ["id", "subject_id", "object_id", "predicate", "session_id",
+                "owner", "created_at", "valid_until", "fact_id", "subject", "object"]
+        return [dict(zip(keys, row)) for row in self.conn.execute(q, params)]
+
+    @_locked
+    def graph_query(self, subject: str = "", predicate: str = "",
+                    object: str = "", session_id: str = "",
+                    owner: str = "", rel: str = "", min_weight: float = 0.0,
+                    max_hops: int = 1, include_expired: bool = False,
+                    as_of: float | None = None, limit: int = 100) -> dict:
+        """Bounded deterministic traversal of entity edges and typed links.
+
+        Direct entity edges use exact subject/predicate/object filters. Typed
+        links use rel/min_weight; both edge and link liveness honor as_of or
+        include_expired. Results are separate lists and never cross a non-empty
+        owner boundary.
+        """
+        if max_hops < 1:
+            raise ValueError("max_hops must be >= 1")
+        if limit < 1:
+            raise ValueError("limit must be >= 1")
+        if min_weight < 0:
+            raise ValueError("min_weight must be >= 0")
+        limit = min(int(limit), 500)
+        max_hops = int(max_hops)
+        rel_filter = rel.strip().lower()
+        base = self.graph_edges(
+            subject=subject, predicate=predicate, object_name=object,
+            session_id=session_id, owner=owner, include_expired=include_expired,
+            as_of=as_of, limit=limit + 1)
+        truncated = len(base) > limit
+        base = base[:limit]
+        edges: dict[int, dict] = {}
+        links: dict[int, dict] = {}
+        total = 0
+        queue: list[tuple[str, int, int]] = []
+        visited: set[tuple[str, int]] = set()
+
+        def enqueue(table: str, oid: int, depth: int) -> None:
+            key = (table, int(oid))
+            if key not in visited and len(visited) < limit * 20:
+                visited.add(key)
+                queue.append((table, int(oid), depth))
+
+        def add_edge(row: dict, depth: int) -> bool:
+            nonlocal total
+            eid = int(row["id"])
+            if eid in edges or total >= limit:
+                return False
+            edges[eid] = {
+                "kind": "um_edges", "id": eid,
+                "subject": row["subject"], "predicate": row["predicate"],
+                "object": row["object"], "session_id": row["session_id"] or "",
+                "depth": depth,
+            }
+            total += 1
+            return True
+
+        def add_link(row: dict, depth: int) -> bool:
+            nonlocal total
+            lid = int(row["link_id"])
+            if lid in links or total >= limit:
+                return False
+            links[lid] = {
+                "kind": "um_links", "id": lid,
+                "src": {"table": row["src_table"], "id": int(row["src_id"])},
+                "dst": {"table": row["dst_table"], "id": int(row["dst_id"])},
+                "rel": row["rel"], "weight": float(row["weight"] or 0.0),
+                "session_id": row["session_id"] or "", "depth": depth,
+            }
+            total += 1
+            return True
+
+        for row in base:
+            if not add_edge(row, 1):
+                break
+            enqueue("um_edges", int(row["id"]), 0)
+            if int(row["fact_id"] or 0):
+                enqueue("um_facts", int(row["fact_id"]), 0)
+            enqueue("um_entities", int(row["subject_id"]), 1)
+            enqueue("um_entities", int(row["object_id"]), 1)
+
+        head = 0
+        while head < len(queue) and total < limit:
+            table, oid, depth = queue[head]
+            head += 1
+            if depth >= max_hops:
+                continue
+            if table != "um_entities" and not self.node_ok(
+                    table, oid, owner=owner, include_expired=include_expired,
+                    as_of=as_of, session_id=session_id):
+                continue
+            if table == "um_entities":
+                for step in self.edge_steps_of_entity(
+                        oid, owner=owner, include_expired=include_expired,
+                        as_of=as_of, session_id=session_id,
+                        predicate=predicate.strip().lower(), limit=limit):
+                    edge_row = {
+                        "id": step["edge_id"], "subject": step["subject"],
+                        "predicate": step["predicate"], "object": step["object"],
+                        "session_id": step["session_id"],
+                    }
+                    edge_depth = depth + 1
+                    if add_edge(edge_row, edge_depth):
+                        enqueue("um_entities", int(step["other_id"]), edge_depth)
+                    if int(step.get("fact_id") or 0):
+                        enqueue("um_facts", int(step["fact_id"]), edge_depth)
+                continue
+            if table == "um_facts":
+                for bridge in self.entity_ids_for_fact(oid, owner=owner,
+                                                         limit=limit):
+                    enqueue("um_entities", int(bridge["subject_id"]), depth + 1)
+                    enqueue("um_entities", int(bridge["object_id"]), depth + 1)
+            for neighbor in self.link_neighbors(
+                    table, oid, owner=owner, include_expired=include_expired,
+                    as_of=as_of, rel=rel_filter, min_weight=min_weight,
+                    session_id=session_id, limit=limit):
+                ntable, noid = neighbor["table"], int(neighbor["id"])
+                if not self.node_ok(ntable, noid, owner=owner,
+                                    include_expired=include_expired,
+                                    as_of=as_of, session_id=session_id):
+                    continue
+                if not add_link(neighbor, depth + 1):
+                    break
+                enqueue(ntable, noid, depth + 1)
+
+        edges_out = sorted(edges.values(), key=lambda row: (row["depth"], row["id"]))
+        links_out = sorted(links.values(), key=lambda row: (row["depth"], row["id"]))
+        return {"edges": edges_out, "links": links_out,
+                "truncated": truncated or total >= limit}
 
     @_locked
     def neighbors(self, entity_name: str, session_id: str = "",

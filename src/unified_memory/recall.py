@@ -68,7 +68,15 @@ class Router:
             return []  # #5: без session_id граф/поиск вернули бы чужие данные
         if source and scope == "facts":
             return []
-        self.last_stats = {"dim_skipped": 0}
+        self.last_stats = {
+            "dim_skipped": 0,
+            "importance": {
+                "weight": self.cfg.importance_weight,
+                "evaluated": 0,
+                "applied": 0,
+                "delta": {},
+            },
+        }
         lists: list[list[Hit]] = []
         vec_hits: list[Hit] = []
         timing: dict = {}
@@ -178,7 +186,10 @@ class Router:
         # v0.4-п.3: один пайп поверх fused — recency-приор, scope-bias, MMR.
         # Timestamps одним batch (макс. 4 запроса), а не правками трёх arm'ов.
         fused = lists[0] if len(lists) == 1 else rrf_fuse(lists)
-        stamps = self.store.created_for([(h.owner_table, h.owner_id) for h in fused])
+        fused_refs = [(h.owner_table, h.owner_id) for h in fused]
+        stamps = self.store.created_for(fused_refs)
+        importance_values = (self.store.importance_for(fused_refs)
+                             if self.cfg.importance_weight > 0 else {})
         now = time.time()
         adjusted = []
         for h in fused:
@@ -189,6 +200,19 @@ class Router:
                 score *= 0.5 + 0.5 * math.exp(-age_days / self.cfg.recency_halflife_days)
             if scope == "all" and session_id and h.session_id == session_id:
                 score *= 1.0 + self.cfg.scope_bias
+            if self.cfg.importance_weight > 0:
+                ref = (h.owner_table, h.owner_id)
+                importance = importance_values.get(ref, 0.5)
+                # Bounded centered multiplier: importance adjusts relevance,
+                # but cannot replace a materially stronger semantic match.
+                before_importance = score
+                score *= 1.0 + self.cfg.importance_weight * (importance - 0.5)
+                delta = score - before_importance
+                self.last_stats["importance"]["evaluated"] += 1
+                if abs(delta) > 1e-12:
+                    self.last_stats["importance"]["applied"] += 1
+                    self.last_stats["importance"]["delta"][
+                        f"{h.owner_table}:{h.owner_id}"] = round(delta, 8)
             adjusted.append(Hit(h.owner_table, h.owner_id, h.body, score,
                                 h.session_id, h.extra, ts, snippet=h.snippet,
                                 archived=h.archived))
@@ -208,6 +232,7 @@ class Router:
                                    fuse_ms=round((time.perf_counter() - t0) * 1000, 3)),
                 "hops": hops,
                 "bfs": self.last_stats.get("bfs"),
+                "importance": self.last_stats.get("importance", {}),
                 "degraded": {"vectors_enabled": self.backend is not None,
                              "fts": self.store.fts,
                              "vec_index": self.last_stats.get("vec_index", "-"),

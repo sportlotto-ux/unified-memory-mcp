@@ -11,7 +11,7 @@ import json
 import pytest
 
 TOOLS = {
-    "mem_remember", "mem_fact", "mem_link", "mem_recall", "mem_expand",
+    "mem_remember", "mem_fact", "mem_link", "mem_graph_query", "mem_recall", "mem_expand",
     "mem_update", "mem_compact", "mem_assemble", "mem_forget", "mem_reindex",
     "mem_recent", "mem_evidence", "mem_batch", "mem_get", "mem_inspect",
     "mem_load_session", "mem_status", "mem_doctor",
@@ -48,6 +48,11 @@ def test_inmemory_smoke(srv):
                                  "body": "дым-тест прошёл"})
                 fid = json.loads(made.content[0].text)["id"]
                 assert isinstance(fid, int)
+
+                graph = json.loads((await client.call_tool(
+                    "mem_graph_query", {"subject": "missing"}
+                )).content[0].text)
+                assert graph["edges"] == [] and graph["links"] == []
 
                 detail = json.loads((await client.call_tool(
                     "mem_get", {"kind": "fact", "id": fid}

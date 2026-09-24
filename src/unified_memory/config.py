@@ -103,6 +103,10 @@ def _default_mmr() -> float:
     return _strict_float("UM_MMR_LAMBDA", 0.7)
 
 
+def _default_importance_weight() -> float:
+    return _strict_float("UM_IMPORTANCE_WEIGHT", 0.0)
+
+
 def _default_retention() -> int:
     return _strict_int("UM_RETENTION_DAYS", 0)  # 0 = вечно (lossless-дефолт)
 
@@ -232,6 +236,8 @@ class Config:
     compact_max_msgs: int = field(default_factory=_default_compact_max_msgs)
     # P1.3: bounded lexical scan cap for explicit archive recall.
     archive_recall_scan: int = field(default_factory=_default_archive_recall_scan)
+    # P1.4: optional bounded importance multiplier; 0 preserves legacy ranking.
+    importance_weight: float = field(default_factory=_default_importance_weight)
 
     def __post_init__(self) -> None:
         if self.embedding_backend not in ("local", "openai"):
@@ -250,6 +256,8 @@ class Config:
             raise ValueError("UM_SCOPE_BIAS must be >= 0 (0 = no session boost)")
         if not 0.0 <= self.mmr_lambda <= 1.0:
             raise ValueError("UM_MMR_LAMBDA must be in [0, 1] (1 = pure relevance)")
+        if not 0.0 <= self.importance_weight <= 1.0:
+            raise ValueError("UM_IMPORTANCE_WEIGHT must be in [0, 1] (0 = off)")
         if self.retention_days < 0:
             raise ValueError("UM_RETENTION_DAYS must be >= 0 (0 = keep forever)")
         if self.archive_size_mb <= 0:

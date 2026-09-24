@@ -17,6 +17,7 @@ Guardrails (план v0.8):
 """
 
 import time as _time
+from dataclasses import replace
 
 import pytest
 
@@ -161,6 +162,28 @@ def test_eval_baseline(kb):
     hit_rate, mrr = hit / n, rr_sum / n
     assert hit_rate >= MIN_HIT_RATE, f"hit@{TOP_N} {hit_rate:.3f} < {MIN_HIT_RATE}"
     assert mrr >= MIN_MRR, f"MRR {mrr:.3f} < {MIN_MRR}"
+
+
+def test_eval_importance_case_is_bounded(kb, monkeypatch):
+    """P1.4 ranking case: high importance adjusts, but does not override relevance."""
+    st, r, _ = kb
+    exact_body = "importancecase"
+    weak_body = exact_body + " " + "distractor " * 40
+    exact = st.add_fact("importance", "exact", exact_body, importance=0.0)
+    weak = st.add_fact("importance", "weak", weak_body, importance=0.95)
+    st.add_vector("um_facts", exact, r.backend.embed_docs([exact_body])[0],
+                  r.backend.model_name)
+    st.add_vector("um_facts", weak, r.backend.embed_docs([weak_body])[0],
+                  r.backend.model_name)
+    cfg = replace(r.cfg, recency_halflife_days=0.0, mmr_lambda=1.0,
+                  importance_weight=0.25)
+    monkeypatch.setattr(st, "fts_search", lambda *args, **kwargs: [])
+    ranked_router = Router(st, r.backend, cfg)
+    ranked = ranked_router.recall(
+        exact_body, scope="facts", limit=2, diagnostics=True)
+    assert [h.owner_id for h in ranked] == [exact, weak]
+    importance = ranked_router.last_stats.get("diagnostics", {}).get("importance", {})
+    assert importance["weight"] == pytest.approx(0.25)
 
 
 def test_eval_weight_orders_within_arm(kb):

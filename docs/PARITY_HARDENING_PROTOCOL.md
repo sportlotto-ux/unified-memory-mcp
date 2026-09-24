@@ -1,6 +1,6 @@
 # PARITY_HARDENING_PROTOCOL — регламент реализации unified-memory
 
-Статус: **P0.1–P0.4, P1.1, P1.2 и P1.3 реализованы; изменения P1.2/P1.3 не закоммичены**.
+Статус: **P0.1–P0.4, P1.1, P1.2, P1.3, P1.4 и P1.5 реализованы; изменения P1.2–P1.5 не закоммичены**.
 
 Документ фиксирует порядок работ после аудита переноса из `hermes-lcm` и
 `mnemosyne`. Цель — не расширять API поверх известных correctness/lifecycle
@@ -289,6 +289,7 @@ raw backlog.
 - добавить конфигурируемый bounded importance component;
 - default сохраняет текущий ranking, если отдельно не согласован иной default;
 - `importance=0.95` не означает unconditional top;
+- component — bounded centered multiplier `1 + weight × (importance − 0.5)`, weight ∈ `[0,1]`; non-fact rows используют neutral `0.5`;
 - diagnostics показывает вклад importance;
 - eval fixture расширяется отдельным ranking case.
 
@@ -301,6 +302,11 @@ raw backlog.
 - deterministic order;
 - owner/session/liveness semantics;
 - no implicit cross-owner traversal.
+
+Контракт P1.5: `mem_graph_query` возвращает bounded deterministic `{edges, links, truncated}`;
+subject/predicate/object — exact case-insensitive filters для `um_edges`, `rel`/`min_weight` — для
+`um_links`; `as_of` использует `[created_at, valid_until)`, `include_expired` включает историю,
+`max_hops` ограничен `UM_RECALL_MAX_HOPS`, а непустой `owner`/`session_id` не обходятся.
 
 ### P1.6 — Upstream migration adapters
 
@@ -387,8 +393,8 @@ Validation:
 | P1.1 mem_get/inspect | done (uncommitted) | — | exact metadata/vector/links lookup; store/session diagnostics; 17-tool MCP smoke; full suite 342/4 (3.14), 326/7 (3.12); wheel smoke OK |
 | P1.2 lineage | done (uncommitted) | — | lineage table, mem_expand, mem_load_session, export/import, source-filter recall; full suite 346/4 (3.14), 330/7 (3.12); wheel smoke OK |
 | P1.3 archive recall | done (uncommitted) | — | explicit include_archived bounded lexical scan; owner/session/source/scope filters; no archive creation on read; full suite 351/4 (3.14), 335/7 (3.12); wheel smoke OK |
-| P1.4 importance | pending | — | default-compatible |
-| P1.5 graph query | pending | — | exact graph contract |
+| P1.4 importance | done (uncommitted) | — | optional bounded centered multiplier for facts; UM_IMPORTANCE_WEIGHT default 0; diagnostics + eval ranking case; full suite 356/4 (3.14), 340/7 (3.12); wheel smoke OK |
+| P1.5 graph query | done (uncommitted) | — | mem_graph_query with exact edge filters, typed-link rel/min_weight, as_of/liveness, bounded max_hops, owner/session isolation, deterministic edges/links; full suite 360/4 (3.14), 344/7 (3.12); wheel smoke OK |
 | P1.6 migration | pending | — | dry-run first |
 
 ## 9. Final gate
