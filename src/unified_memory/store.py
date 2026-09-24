@@ -19,7 +19,28 @@ from pathlib import Path
 from .config import Config
 from .embeddings import check_store_dim
 
-SCHEMA = """
+
+def _links_table_sql(name: str, *, if_not_exists: bool = True) -> str:
+    exists = "IF NOT EXISTS " if if_not_exists else ""
+    return f"""CREATE TABLE {exists}{name} (
+    id INTEGER PRIMARY KEY,
+    src_table TEXT NOT NULL CHECK (src_table IN
+        ('um_messages', 'um_facts', 'um_summaries', 'um_edges')),
+    src_id INTEGER NOT NULL,
+    dst_table TEXT NOT NULL CHECK (dst_table IN
+        ('um_messages', 'um_facts', 'um_summaries', 'um_edges')),
+    dst_id INTEGER NOT NULL,
+    rel TEXT NOT NULL CHECK (rel IN
+        ('supports', 'contradicts', 'supersedes', 'derives_from')),
+    weight REAL NOT NULL DEFAULT 1.0 CHECK (weight >= 0),
+    owner TEXT NOT NULL DEFAULT '',
+    session_id TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    valid_until REAL NOT NULL DEFAULT 0  -- 0 = живое
+);"""
+
+
+SCHEMA = f"""
 PRAGMA journal_mode=WAL;
 
 CREATE TABLE IF NOT EXISTS um_messages (
@@ -99,22 +120,7 @@ CREATE TABLE IF NOT EXISTS um_edges (
 
 -- ADR-001: типизированные связи памяти (message<->fact, fact<->fact).
 -- Traversal-only: ни FTS, ни векторов; um_edges (entity-граф) не трогаем.
-CREATE TABLE IF NOT EXISTS um_links (
-    id INTEGER PRIMARY KEY,
-    src_table TEXT NOT NULL CHECK (src_table IN
-        ('um_messages', 'um_facts', 'um_summaries', 'um_edges')),
-    src_id INTEGER NOT NULL,
-    dst_table TEXT NOT NULL CHECK (dst_table IN
-        ('um_messages', 'um_facts', 'um_summaries', 'um_edges')),
-    dst_id INTEGER NOT NULL,
-    rel TEXT NOT NULL CHECK (rel IN
-        ('supports', 'contradicts', 'supersedes', 'derives_from')),
-    weight REAL NOT NULL DEFAULT 1.0 CHECK (weight >= 0),
-    owner TEXT NOT NULL DEFAULT '',
-    session_id TEXT NOT NULL DEFAULT '',
-    created_at REAL NOT NULL,
-    valid_until REAL NOT NULL DEFAULT 0  -- 0 = живое
-);
+{_links_table_sql("um_links")}
 """
 
 _INDEXES = [
@@ -256,6 +262,14 @@ LINK_RELS = ("supports", "contradicts", "supersedes", "derives_from")
 LINK_TABLES = ("um_messages", "um_facts", "um_summaries", "um_edges")
 
 
+_LINK_CHECK_PATTERNS = (
+    re.compile(r"\bCHECK\s*\(\s*src_table\b", re.IGNORECASE),
+    re.compile(r"\bCHECK\s*\(\s*dst_table\b", re.IGNORECASE),
+    re.compile(r"\bCHECK\s*\(\s*rel\b", re.IGNORECASE),
+    re.compile(r"\bCHECK\s*\(\s*weight\b", re.IGNORECASE),
+)
+
+
 class Store:
     """Синхронное ядро. Один инстанс на процесс (см. single-writer в MIGRATION_PLAN)."""
 
@@ -268,6 +282,7 @@ class Store:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA busy_timeout=10000")
         self._recover_entity_migration()
+        self._recover_link_migration()
         self.conn.executescript(SCHEMA)
         # Миграция существующих БД: fact_id добавлен позже (#4).
         cols = [r[1] for r in self.conn.execute("PRAGMA table_info(um_edges)")]
@@ -306,14 +321,7 @@ class Store:
                 "ALTER TABLE um_edges ADD COLUMN valid_until REAL NOT NULL DEFAULT 0")
             self.conn.commit()
         # v0.7: um_links получил CHECK на концы/вес ПОСЛЕ первых прогонов.
-        # Таблица гарантированно пустая (v0.7 не выпущен) → пересборка безопасна.
-        lrow = self.conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='um_links'"
-        ).fetchone()
-        if lrow and "CHECK (src_table" not in (lrow[0] or ""):
-            self.conn.executescript("DROP TABLE um_links;")
-            self.conn.executescript(SCHEMA)
-            self.conn.commit()
+        self._migrate_links_constraints()
         # P4.5: индекс создаётся строго ПОСЛЕ dedupe в том же проходе, значит его
         # наличие ⟹ dedupe уже отработал. Полный скан на каждом открытии не гоняем.
         _idx = self.conn.execute(
@@ -399,6 +407,83 @@ class Store:
             self.conn.execute("DROP TABLE um_entities")
             self.conn.execute(
                 "ALTER TABLE um_entities_new RENAME TO um_entities")
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    @staticmethod
+    def _links_have_constraints(sql: str | None) -> bool:
+        text = sql or ""
+        return all(pattern.search(text) for pattern in _LINK_CHECK_PATTERNS)
+
+    def _recover_link_migration(self) -> None:
+        """Recover a staging table left by an interrupted links rebuild."""
+        names = {r[0] for r in self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        if "um_links_new" not in names:
+            return
+        lrow = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table'"
+            " AND name='um_links_new'"
+        ).fetchone()
+        new_cols = {r[1] for r in self.conn.execute(
+            "PRAGMA table_info(um_links_new)")}
+        required = {
+            "id", "src_table", "src_id", "dst_table", "dst_id", "rel",
+            "weight", "owner", "session_id", "created_at", "valid_until",
+        }
+        if not self._links_have_constraints(lrow[0] if lrow else None):
+            raise ValueError("invalid um_links_new staging table")
+        if not required.issubset(new_cols):
+            raise ValueError("invalid um_links_new staging columns")
+        if "um_links" in names:
+            # The old table remains authoritative; a staging table cannot be
+            # trusted unless the old table is already absent.
+            self.conn.execute("DROP TABLE um_links_new")
+            self.conn.commit()
+            return
+        self.conn.execute("ALTER TABLE um_links_new RENAME TO um_links")
+        self.conn.commit()
+
+    def _migrate_links_constraints(self) -> None:
+        """Rebuild legacy um_links atomically with endpoint and weight checks."""
+        lrow = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table'"
+            " AND name='um_links'"
+        ).fetchone()
+        if not lrow or self._links_have_constraints(lrow[0]):
+            return
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            old_count = self.conn.execute(
+                "SELECT count(*) FROM um_links").fetchone()[0]
+            self.conn.execute(_links_table_sql("um_links_new", if_not_exists=False))
+            self.conn.execute("""
+                INSERT INTO um_links_new(
+                    id, src_table, src_id, dst_table, dst_id, rel, weight,
+                    owner, session_id, created_at, valid_until)
+                SELECT id, src_table, src_id, dst_table, dst_id, rel, weight,
+                    owner, session_id, created_at, valid_until
+                FROM um_links
+            """)
+            new_count = self.conn.execute(
+                "SELECT count(*) FROM um_links_new").fetchone()[0]
+            if new_count != old_count:
+                raise RuntimeError("um_links migration row count mismatch")
+            duplicate = self.conn.execute("""
+                SELECT src_table, src_id, dst_table, dst_id, rel, owner
+                FROM um_links
+                WHERE valid_until = 0
+                GROUP BY src_table, src_id, dst_table, dst_id, rel, owner
+                HAVING count(*) > 1
+                LIMIT 1
+            """).fetchone()
+            if duplicate is not None:
+                raise ValueError("legacy um_links contains duplicate live links")
+            self.conn.execute("DROP TABLE um_links")
+            self.conn.execute(
+                "ALTER TABLE um_links_new RENAME TO um_links")
             self.conn.commit()
         except Exception:
             self.conn.rollback()
