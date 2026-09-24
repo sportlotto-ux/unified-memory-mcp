@@ -41,7 +41,7 @@ SUPPORTED = ("1",)
 
 # Вставляемые таблицы в порядке зависимостей.
 IMPORT_TABLES = ("um_entities", "um_facts", "um_messages", "um_summaries",
-                 "um_edges", "um_links", "um_vectors")
+                 "um_summary_sources", "um_edges", "um_links", "um_vectors")
 # um_meta читаем (schema_version), um_fts/um_vecidx — производные (legacy-дампы
 # их содержат), при импорте игнорируются: FTS пересобирается, vecidx — reindex.
 IGNORED = ("um_meta", "um_fts", "um_vecidx")
@@ -225,6 +225,22 @@ def _summaries(store, rows, mmap, owner, rep):
     return m
 
 
+def _summary_sources(store, rows, mmap, smap, owner, rep):
+    for r in rows:
+        sid = smap.get(int(r.get("summary_id") or 0))
+        source_table = r.get("source_table")
+        source_id = (mmap if source_table == "um_messages" else smap).get(
+            int(r.get("source_id") or 0))
+        if not sid or source_table not in ("um_messages", "um_summaries")                 or not source_id:
+            rep["um_summary_sources"]["skipped"] += 1
+            continue
+        store.conn.execute(
+            "INSERT OR IGNORE INTO um_summary_sources"
+            "(summary_id, source_table, source_id, position) VALUES(?,?,?,?)",
+            (sid, source_table, source_id, int(r.get("position") or 0)))
+        rep["um_summary_sources"]["inserted"] += 1
+
+
 def _edges(store, rows, emap, fmap, owner, rep):
     m: dict[int, int] = {}
     for r in rows:
@@ -305,6 +321,8 @@ def import_dump(store: Store, path: str | Path, owner: str | None = None,
         fmap = _facts(store, tables.get("um_facts", []), owner, rep)
         mmap = _messages(store, tables.get("um_messages", []), owner, rep)
         smap = _summaries(store, tables.get("um_summaries", []), mmap, owner, rep)
+        _summary_sources(store, tables.get("um_summary_sources", []),
+                         mmap, smap, owner, rep)
         edgemap = _edges(store, tables.get("um_edges", []), emap, fmap, owner, rep)
         maps = {"um_entities": emap, "um_facts": fmap, "um_messages": mmap,
                 "um_summaries": smap, "um_edges": edgemap}

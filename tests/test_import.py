@@ -101,6 +101,31 @@ def test_roundtrip_all_tables(tmp_path):
         src.close()
 
 
+def test_roundtrip_preserves_summary_lineage(tmp_path):
+    src = _fresh(tmp_path, "lineage-src.db")
+    dst = _fresh(tmp_path, "lineage-dst.db")
+    try:
+        first = src.add_message("s", "user", "first")
+        second = src.add_message("s", "user", "second")
+        leaf = src.add_summary(
+            "s", "leaf", covers_from=first, covers_to=second,
+            sources=[("um_messages", first), ("um_messages", second)])
+        src.add_summary("s", "parent", depth=1,
+                        sources=[("um_summaries", leaf)])
+        dump = tmp_path / "lineage.jsonl"
+        export_store(src, dump)
+        import_dump(dst, dump)
+        refs = dst.conn.execute(
+            "SELECT source_table, source_id FROM um_summary_sources"
+            " ORDER BY summary_id, position").fetchall()
+        assert [row[0] for row in refs] == [
+            "um_messages", "um_messages", "um_summaries"]
+        assert refs[-1][1] == 1  # fresh summary id remap
+    finally:
+        dst.close()
+        src.close()
+
+
 def test_import_works_without_backend(tmp_path):
     src = _source(tmp_path)
     try:

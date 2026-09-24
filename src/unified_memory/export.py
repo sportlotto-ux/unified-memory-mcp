@@ -29,8 +29,9 @@ COMPLETE_FORMAT = "um-export-jsonl-complete"
 
 # Контент-таблицы в стабильном порядке. um_fts/um_vecidx — производные
 # (см. docstring), в дамп не входят.
-CONTENT_TABLES = ("um_messages", "um_summaries", "um_facts", "um_entities",
-                  "um_edges", "um_links", "um_vectors", "um_meta")
+CONTENT_TABLES = ("um_messages", "um_summaries", "um_summary_sources",
+                   "um_facts", "um_entities", "um_edges", "um_links",
+                   "um_vectors", "um_meta")
 
 
 def _encode_row(cols: list[str], row: tuple) -> dict:

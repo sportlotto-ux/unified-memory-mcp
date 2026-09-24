@@ -1,4 +1,4 @@
-"""v0.7.3 C11: поведенческие хинты у всех 15 тулов (mcp ToolAnnotations)."""
+"""v0.7.3 C11: поведенческие хинты у всех 18 тулов (mcp ToolAnnotations)."""
 
 import asyncio
 
@@ -11,6 +11,9 @@ _EXPECTED = {
     "mem_link": (False, False, True),
     "mem_recall": (True, False, True),
     "mem_expand": (True, False, True),
+    "mem_get": (True, False, True),
+    "mem_inspect": (True, False, True),
+    "mem_load_session": (True, False, True),
     "mem_update": (False, False, False),
     "mem_compact": (False, False, True),
     "mem_assemble": (True, False, True),

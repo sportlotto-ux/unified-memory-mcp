@@ -290,7 +290,9 @@ class Ingest:
             return {"status": "degraded", "error": f"{type(e).__name__}: {e}"[:200]}
         sid = self.store.add_summary(session_id, body, depth=0,
                                      covers_from=head[0]["id"], covers_to=head[-1]["id"],
-                                     owner=owner)
+                                     owner=owner,
+                                     sources=[("um_messages", m["id"])
+                                              for m in head])
         self.store.meta_set(fkey, str(head[-1]["id"]))
         return {"status": "compacted", "summary_id": sid,
                 "covered": len(head), "kept_tail": len(tail)}

@@ -13,7 +13,8 @@ import pytest
 TOOLS = {
     "mem_remember", "mem_fact", "mem_link", "mem_recall", "mem_expand",
     "mem_update", "mem_compact", "mem_assemble", "mem_forget", "mem_reindex",
-    "mem_recent", "mem_evidence", "mem_batch", "mem_status", "mem_doctor",
+    "mem_recent", "mem_evidence", "mem_batch", "mem_get", "mem_inspect",
+    "mem_load_session", "mem_status", "mem_doctor",
 }
 
 
@@ -47,6 +48,30 @@ def test_inmemory_smoke(srv):
                                  "body": "дым-тест прошёл"})
                 fid = json.loads(made.content[0].text)["id"]
                 assert isinstance(fid, int)
+
+                detail = json.loads((await client.call_tool(
+                    "mem_get", {"kind": "fact", "id": fid}
+                )).content[0].text)
+                assert detail["found"] and "дым-тест" in detail["body"]
+                made_message = await client.call_tool(
+                    "mem_remember", {"session_id": "smoke", "role": "user",
+                                     "content": "сообщение для inspect"}
+                )
+                mid = json.loads(made_message.content[0].text)["id"]
+                message_detail = json.loads((await client.call_tool(
+                    "mem_get", {"kind": "message", "id": mid}
+                )).content[0].text)
+                assert message_detail["metadata"]["session_id"] == "smoke"
+                inspected = json.loads((await client.call_tool(
+                    "mem_inspect", {"session_id": "smoke", "message_id": mid}
+                )).content[0].text)
+                assert "store" in inspected and "archive" in inspected
+                assert inspected["session"]["pressure"]["messages"] == 1
+                assert inspected["message"]["metadata"]["session_id"] == "smoke"
+                transcript = json.loads((await client.call_tool(
+                    "mem_load_session", {"session_id": "smoke", "limit": 10}
+                )).content[0].text)
+                assert transcript["items"][0]["body"] == "сообщение для inspect"
 
                 rec = await client.call_tool(
                     "mem_recall", {"query": "дым-тест", "scope": "facts"})

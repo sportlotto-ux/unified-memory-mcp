@@ -13,6 +13,8 @@ import sqlite3
 from pathlib import Path
 from urllib.parse import quote
 
+from .file_permissions import ensure_private_parent, restrict_new_sqlite_files
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS ar_messages(
     id INTEGER PRIMARY KEY,
@@ -38,11 +40,17 @@ CREATE INDEX IF NOT EXISTS ar_vec_owner ON ar_vectors(owner_table, owner_id);
 
 def open_archive(path) -> sqlite3.Connection:
     p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
+    seen: set[Path] = {
+        Path(f"{p}{suffix}")
+        for suffix in ("", "-wal", "-shm")
+        if Path(f"{p}{suffix}").exists()
+    }
+    ensure_private_parent(p)
     conn = sqlite3.connect(str(p))
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
     conn.commit()
+    restrict_new_sqlite_files(p, seen)
     return conn
 
 

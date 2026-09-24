@@ -142,7 +142,8 @@ class ActiveWindow:
                 sid = self.store.add_summary(
                     session_id, body, depth=0,
                     covers_from=head[0]["id"], covers_to=head[-1]["id"],
-                    owner=owner, _commit=False)
+                    owner=owner, _commit=False,
+                    sources=[("um_messages", m["id"]) for m in head])
                 self.store.bump_raw_tokens(
                     session_id, -sum(estimate_tokens(m["content"]) for m in head),
                     owner, _commit=False)
@@ -194,7 +195,8 @@ class ActiveWindow:
                 session_id, body, depth=depth + 1,
                 covers_from=min(covers) if covers else None,
                 covers_to=max(covers) if covers else None, owner=owner,
-                _commit=False)
+                _commit=False,
+                sources=[("um_summaries", k[0]) for k in kids])
             self.store.execute_write(
                 f"UPDATE um_summaries SET superseded_by={int(sid)}"
                 f" WHERE id IN ({','.join('?' * len(kids))})",

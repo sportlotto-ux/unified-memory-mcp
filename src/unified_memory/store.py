@@ -18,6 +18,7 @@ from pathlib import Path
 
 from .config import Config
 from .embeddings import check_store_dim
+from .file_permissions import ensure_private_parent, restrict_new_sqlite_files
 
 
 def _links_table_sql(name: str, *, if_not_exists: bool = True) -> str:
@@ -68,6 +69,15 @@ CREATE TABLE IF NOT EXISTS um_summaries (
     created_at REAL NOT NULL
 );
 
+
+CREATE TABLE IF NOT EXISTS um_summary_sources (
+    summary_id INTEGER NOT NULL,
+    source_table TEXT NOT NULL CHECK (source_table IN
+        ('um_messages', 'um_summaries')),
+    source_id INTEGER NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (summary_id, source_table, source_id)
+);
 
 CREATE TABLE IF NOT EXISTS um_facts (
     id INTEGER PRIMARY KEY,
@@ -128,6 +138,8 @@ _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_um_messages_owner ON um_messages(owner, session_id)",
     "CREATE INDEX IF NOT EXISTS idx_um_summaries_session ON um_summaries(session_id, depth)",
     "CREATE INDEX IF NOT EXISTS idx_um_summaries_owner ON um_summaries(owner, session_id)",
+    "CREATE INDEX IF NOT EXISTS idx_um_summary_sources_summary"
+    " ON um_summary_sources(summary_id, position)",
     "CREATE INDEX IF NOT EXISTS idx_um_facts_cat ON um_facts(category)",
     "CREATE INDEX IF NOT EXISTS idx_um_facts_owner ON um_facts(owner)",
     "CREATE INDEX IF NOT EXISTS idx_um_vectors_owner ON um_vectors(owner_table, owner_id)",
@@ -274,8 +286,13 @@ class Store:
     """Синхронное ядро. Один инстанс на процесс (см. single-writer в MIGRATION_PLAN)."""
 
     def __init__(self, cfg: Config, embedding_dim: int = 0, embedding_model: str = "") -> None:
-        cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._db_path = str(cfg.db_path)
+        self._artifact_seen: set[Path] = {
+            Path(f"{self._db_path}{suffix}")
+            for suffix in ("", "-wal", "-shm")
+            if Path(f"{self._db_path}{suffix}").exists()
+        }
+        ensure_private_parent(cfg.db_path)
         self._lock = threading.RLock()
         self._sp_stack: list[str] = []  # стек активных savepoint'ов (batch/dry-run)
         self.conn = sqlite3.connect(str(cfg.db_path), check_same_thread=False)
@@ -322,6 +339,7 @@ class Store:
         self.conn.execute(
             "INSERT OR IGNORE INTO um_meta(key, value) VALUES('schema_version','1')")
         self.conn.commit()
+        self._restrict_artifacts()
 
     def _migrate_early_columns(self) -> None:
         """Apply early legacy columns and display backfill atomically."""
@@ -570,10 +588,14 @@ class Store:
         return cur.rowcount
 
     # -- транзакционное ядро (v0.7-п.5) -----------------------------------
+    def _restrict_artifacts(self) -> None:
+        restrict_new_sqlite_files(self._db_path, self._artifact_seen)
+
     def _commit_if(self, commit: bool) -> None:
         """Коммит, если вызов не находится внутри batch-транзакции (_commit=False)."""
         if commit:
             self.conn.commit()
+            self._restrict_artifacts()
 
     def _abort(self) -> None:
         """Откат текущей операции: до активного savepoint'а (batch), иначе rollback."""
@@ -949,13 +971,25 @@ class Store:
     @_locked
     def add_summary(self, session_id: str, body: str, depth: int = 0,
                     covers_from: int | None = None, covers_to: int | None = None,
-                    owner: str = "", _commit: bool = True) -> int:
+                    owner: str = "", _commit: bool = True,
+                    sources: list[tuple[str, int]] | None = None) -> int:
+        source_rows = list(sources or [])
+        for source_table, _ in source_rows:
+            if source_table not in ("um_messages", "um_summaries"):
+                raise ValueError(
+                    f"invalid summary source table {source_table!r}")
         cur = self.conn.execute(
             "INSERT INTO um_summaries(session_id, owner, depth, body, covers_from, covers_to, created_at)"
             " VALUES(?,?,?,?,?,?,?)",
             (session_id, owner, depth, body, covers_from, covers_to, time.time()),
         )
         sid = cur.lastrowid
+        for position, (source_table, source_id) in enumerate(source_rows):
+            self.conn.execute(
+                "INSERT OR IGNORE INTO um_summary_sources"
+                "(summary_id, source_table, source_id, position)"
+                " VALUES(?,?,?,?)",
+                (sid, source_table, int(source_id), position))
         self._fts_index("um_summaries", sid, body)
         tokens = estimate_tokens(body)
         self.bump_tokens(session_id, tokens, owner, _commit=False)
@@ -1013,6 +1047,30 @@ class Store:
             )
 
     # -- reads ------------------------------------------------------------
+    @_locked
+    def session_transcript(self, session_id: str, after_id: int = 0,
+                           limit: int = 50, owner: str = "") -> list[dict]:
+        """Paginate the lossless message log, including archive stubs."""
+        q = ("SELECT id, session_id, owner, role, content, created_at, source,"
+             " externalized_ref FROM um_messages WHERE session_id=? AND id>?")
+        params: list = [session_id, after_id]
+        if owner:
+            q += " AND owner=?"
+            params.append(owner)
+        q += " ORDER BY id LIMIT ?"
+        params.append(limit)
+        keys = ["id", "session_id", "owner", "role", "content", "created_at",
+                "source", "externalized_ref"]
+        out = []
+        for row in self.conn.execute(q, params):
+            item = dict(zip(keys, row))
+            item["archived"] = bool(item["externalized_ref"])
+            item["body"] = None if item["archived"] else item["content"]
+            item.pop("content")
+            item["archive_ref"] = item.pop("externalized_ref")
+            out.append(item)
+        return out
+
     @_locked
     def get_message(self, mid: int, owner: str = "") -> dict | None:
         row = self.conn.execute(
@@ -1347,6 +1405,101 @@ class Store:
         return out
 
     @_locked
+    def ref_details(self, owner_table: str, owner_id: int,
+                    owner: str = "") -> dict | None:
+        """Read one object with metadata, vector state, and direct links."""
+        if owner_table not in ("um_messages", "um_summaries", "um_facts", "um_edges"):
+            return None
+        ref = (owner_table, owner_id)
+        if owner and self.owners_for([ref]).get(ref, "") != owner:
+            return None
+        body, session_id = self._body_of(owner_table, owner_id)
+        if body is None:
+            return None
+        if owner_table == "um_messages":
+            row = self.conn.execute(
+                "SELECT session_id, owner, role, created_at, source,"
+                " externalized_ref FROM um_messages WHERE id=?", (owner_id,)
+            ).fetchone()
+            metadata = dict(zip(
+                ["session_id", "owner", "role", "created_at", "source",
+                 "externalized_ref"], row or ()))
+        elif owner_table == "um_summaries":
+            row = self.conn.execute(
+                "SELECT session_id, owner, depth, covers_from, covers_to,"
+                " superseded_by, created_at FROM um_summaries WHERE id=?",
+                (owner_id,)
+            ).fetchone()
+            metadata = dict(zip(
+                ["session_id", "owner", "depth", "covers_from", "covers_to",
+                 "superseded_by", "created_at"], row or ()))
+        elif owner_table == "um_facts":
+            row = self.conn.execute(
+                "SELECT owner, category, name, importance, created_at, updated_at,"
+                " valid_until, superseded_by FROM um_facts WHERE id=?", (owner_id,)
+            ).fetchone()
+            metadata = dict(zip(
+                ["owner", "category", "name", "importance", "created_at",
+                 "updated_at", "valid_until", "superseded_by"], row or ()))
+        else:
+            row = self.conn.execute(
+                """SELECT e.subject_id, e.predicate, e.object_id, e.session_id,
+                          e.owner, e.fact_id, e.created_at, e.valid_until,
+                          s.display, o.display
+                   FROM um_edges e
+                   JOIN um_entities s ON s.id=e.subject_id
+                   JOIN um_entities o ON o.id=e.object_id
+                   WHERE e.id=?""", (owner_id,)
+            ).fetchone()
+            metadata = dict(zip(
+                ["subject_id", "predicate", "object_id", "session_id", "owner",
+                 "fact_id", "created_at", "valid_until", "subject", "object"],
+                row or ()))
+        vector = {"present": False}
+        vrow = self.conn.execute(
+            "SELECT model, embedding FROM um_vectors"
+            " WHERE owner_table=? AND owner_id=?", ref).fetchone()
+        if vrow:
+            try:
+                dim = len(unpack_vector(vrow[1]))
+            except Exception:
+                dim = 0
+            vector = {"present": True, "model": vrow[0], "dim": dim}
+        links = []
+        for row in self.conn.execute(
+                """SELECT src_table, src_id, dst_table, dst_id, rel, weight,
+                          owner, valid_until
+                   FROM um_links
+                   WHERE (src_table=? AND src_id=?)
+                      OR (dst_table=? AND dst_id=?)
+                   ORDER BY id""",
+                (owner_table, owner_id, owner_table, owner_id)):
+            links.append(dict(zip(
+                ["src_table", "src_id", "dst_table", "dst_id", "rel", "weight",
+                 "owner", "valid_until"], row)))
+        return {"body": body, "session_id": session_id, "metadata": metadata,
+                "vector": vector, "links": links}
+
+
+    @_locked
+    def summary_lineage(self, summary_id: int, owner: str = "") -> dict | None:
+        """Return direct source refs for one summary, preserving order."""
+        if not self.node_ok("um_summaries", int(summary_id), owner):
+            return None
+        refs = []
+        for source_table, source_id, position in self.conn.execute(
+                "SELECT source_table, source_id, position FROM um_summary_sources"
+                " WHERE summary_id=? ORDER BY position, source_table, source_id",
+                (int(summary_id),)):
+            refs.append({
+                "kind": ("message" if source_table == "um_messages" else "summary"),
+                "table": source_table,
+                "id": int(source_id),
+                "position": int(position),
+            })
+        return {"summary_id": int(summary_id), "sources": refs}
+
+    @_locked
     def fact_slots(self, refs: list[tuple[str, int]]) -> dict[tuple[str, int], dict]:
         """(owner, category, name, body) для um_facts refs — для conflict-detect."""
         ids = [oid for ot, oid in refs if ot == "um_facts"]
@@ -1503,6 +1656,7 @@ class Store:
             "DELETE FROM um_meta WHERE key LIKE 'tokens:%'"
             " OR key LIKE 'raw_tokens:%' OR key LIKE 'summary_tokens:%'")
         self.conn.commit()
+        self._restrict_artifacts()
 
     @_locked
     def vectors_for(self, refs: list[tuple[str, int]]) -> dict[tuple[str, int], list[float]]:
@@ -1590,6 +1744,7 @@ class Store:
             n += 1
         self.meta_set("vec_index_dim", str(dim))
         self.conn.commit()
+        self._restrict_artifacts()
         return n
 
     @_locked
@@ -2226,11 +2381,15 @@ class Store:
             except Exception as e:
                 report["vec_index_error"] = f"{type(e).__name__}: {e}"[:200]
         self.conn.commit()
+        self._restrict_artifacts()
         return report
 
     @_locked
     def close(self) -> None:
-        self.conn.close()
+        try:
+            self.conn.close()
+        finally:
+            self._restrict_artifacts()
 
 
 def open_db(cfg: Config, embedding_dim: int, embedding_model: str):

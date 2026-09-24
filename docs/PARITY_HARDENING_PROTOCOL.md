@@ -1,6 +1,6 @@
 # PARITY_HARDENING_PROTOCOL — регламент реализации unified-memory
 
-Статус: **P0.1–P0.3 реализованы локально; изменения ещё не закоммичены**.
+Статус: **P0.1–P0.4 и P1.1 реализованы; P1.2 в работе; изменения не закоммичены**.
 
 Документ фиксирует порядок работ после аудита переноса из `hermes-lcm` и
 `mnemosyne`. Цель — не расширять API поверх известных correctness/lifecycle
@@ -383,9 +383,9 @@ Validation:
 | P0.1 FTS scope starvation | done (uncommitted) | — | parent-table scope join before FTS LIMIT; session/owner regressions; full suite 330/4 (3.14), 314/7 (3.12) |
 | P0.2 compaction pressure | done (uncommitted) | — | raw/live-summary counters, compactable backlog trigger, min-batch guard; archive/import invalidation; full suite 335/4 (3.14), 319/7 (3.12); wheel smoke OK |
 | P0.3 model recovery | done (uncommitted) | — | offline `python -m unified_memory.reembed`; atomic full replacement, rollback, summaries/owner coverage; full suite 339/4 (3.14), 323/7 (3.12); wheel smoke OK |
-| P0.4 secure artifacts | pending | — | single-user policy explicit |
-| P1.1 mem_get/inspect | pending | — | after all P0 |
-| P1.2 lineage | pending | — | after P1.1 |
+| P0.4 secure artifacts | done (uncommitted) | — | new private DB/archive parents and SQLite artifacts; existing permissions preserved; full suite 341/4 (3.14), 325/7 (3.12); wheel smoke OK |
+| P1.1 mem_get/inspect | done (uncommitted) | — | exact metadata/vector/links lookup; store/session diagnostics; 17-tool MCP smoke; full suite 342/4 (3.14), 326/7 (3.12); wheel smoke OK |
+| P1.2 lineage | in progress (uncommitted) | — | lineage table + mem_expand + mem_load_session + export/import; source-filter recall remains; full suite 344/4 (3.14), 328/7 (3.12); wheel smoke OK |
 | P1.3 archive recall | pending | — | after lineage decision |
 | P1.4 importance | pending | — | default-compatible |
 | P1.5 graph query | pending | — | exact graph contract |

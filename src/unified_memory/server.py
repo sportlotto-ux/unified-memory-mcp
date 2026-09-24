@@ -1,6 +1,6 @@
 """MCP server: unified memory for Hermes / Claude Code / any MCP client.
 
-Tools: mem_remember mem_fact mem_recall mem_expand
+Tools: mem_remember mem_fact mem_recall mem_expand mem_get mem_inspect
        mem_compact mem_forget mem_status mem_doctor
 
 Run: python -m unified_memory.server  (stdio transport)
@@ -234,8 +234,113 @@ def mem_expand(kind: str, id: int, owner: str = "") -> str:
         return json.dumps({"kind": kind, "id": int(id), "body": None}, ensure_ascii=False)
     body, _ = _store()._body_of(table, int(id))
     meta = _store().row_meta(table, int(id))  # valid_until / superseded_by
-    return json.dumps({"kind": kind, "id": int(id), "body": body, **meta},
-                      ensure_ascii=False)
+    out = {"kind": kind, "id": int(id), "body": body, **meta}
+    if kind == "summary":
+        out["lineage"] = _store().summary_lineage(int(id), owner)
+    return json.dumps(out, ensure_ascii=False)
+
+
+@mcp.tool(annotations=_ann(ro=True, idem=True))
+def mem_get(kind: str, id: int, owner: str = "") -> str:
+    """Read one message/fact/summary/edge with metadata and direct links."""
+    table = {"message": "um_messages", "fact": "um_facts",
+             "summary": "um_summaries", "edge": "um_edges"}.get(kind)
+    if table is None:
+        raise ValueError(
+            f"unknown kind {kind!r}: message | fact | summary | edge")
+    details = _store().ref_details(table, int(id), owner)
+    if details is None:
+        return json.dumps({"kind": kind, "id": int(id), "found": False},
+                          ensure_ascii=False)
+    body = details["body"]
+    archived = False
+    if kind == "message" and details["metadata"].get("externalized_ref"):
+        cfg = _STATE["cfg"]
+        conn = archive.open_archive(cfg.archive_path)
+        try:
+            arc = archive.fetch_message(conn, int(id))
+        finally:
+            conn.close()
+        body = arc["content"] if arc else None
+        archived = True
+    return json.dumps({
+        "kind": kind, "id": int(id), "found": True, "body": body,
+        "archived": archived, "metadata": details["metadata"],
+        "vector": details["vector"], "links": details["links"],
+    }, ensure_ascii=False)
+
+
+@mcp.tool(annotations=_ann(ro=True, idem=True))
+def mem_inspect(session_id: str = "", summary_id: int = 0,
+                message_id: int = 0, owner: str = "") -> str:
+    """Read-only store/session diagnostics without returning all message bodies."""
+    ing = _ingest()
+    cfg = _STATE["cfg"]
+    out = {
+        "store": {
+            **ing.store.stats(),
+            "diagnostics": ing.store.diagnostics(),
+            "hygiene": ing.store.hygiene(),
+        },
+        "archive": archive.audit(ing.store, cfg.archive_path),
+    }
+    if session_id:
+        p = ing.window.pressure(session_id, owner)
+        fkey = (f"frontier:{owner}:{session_id}" if owner
+                else f"frontier:{session_id}")
+        nodes = []
+        for row in ing.store.select(
+                "SELECT id, depth, covers_from, covers_to, superseded_by"
+                " FROM um_summaries WHERE session_id=?"
+                + (" AND owner=?" if owner else "") + " ORDER BY id",
+                (session_id, owner) if owner else (session_id,)):
+            nodes.append(dict(zip(
+                ["id", "depth", "covers_from", "covers_to", "superseded_by"],
+                row)))
+        out["session"] = {
+            "session_id": session_id,
+            "owner": owner,
+            "frontier": int(ing.store.meta_get(fkey) or 0),
+            "pressure": {
+                "tokens_total": p.tokens_total,
+                "raw_backlog_tokens": p.raw_backlog_tokens,
+                "active_summary_tokens": p.active_summary_tokens,
+                "compactable_tokens": p.compactable_tokens,
+                "threshold_tokens": p.threshold_tokens,
+                "over": p.over,
+                "messages": p.messages,
+                "summaries": p.summaries,
+            },
+            "summary_nodes": nodes,
+        }
+    if summary_id:
+        details = ing.store.ref_details("um_summaries", int(summary_id), owner)
+        out["summary"] = details
+    if message_id:
+        details = ing.store.ref_details("um_messages", int(message_id), owner)
+        out["message"] = details
+    return json.dumps(out, ensure_ascii=False)
+
+
+@mcp.tool(annotations=_ann(ro=True, idem=True))
+def mem_load_session(session_id: str, after_id: int = 0, limit: int = 50,
+                     owner: str = "") -> str:
+    """Paginate the lossless session transcript; archived rows return archive refs."""
+    if not session_id:
+        raise ValueError("session_id is required")
+    if limit < 1 or limit > 500:
+        raise ValueError("limit must be between 1 and 500")
+    items = _store().session_transcript(
+        session_id, after_id=int(after_id), limit=limit, owner=owner)
+    next_after = items[-1]["id"] if len(items) == limit else 0
+    return json.dumps({
+        "session_id": session_id,
+        "owner": owner,
+        "after_id": int(after_id),
+        "items": items,
+        "next_after_id": next_after,
+        "has_more": len(items) == limit,
+    }, ensure_ascii=False)
 
 
 @mcp.tool(annotations=_ann())
