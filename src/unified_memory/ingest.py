@@ -146,6 +146,8 @@ class Ingest:
         """Правка факта через Ingest: после store.update_fact переэмбеддить
         новую версию (superseded) или reopened факт — иначе он слеп для
         вектор-плеча (P4.8 удалил вектор при expire)."""
+        if body is not None:
+            body = self._clean(body)
         if _commit:
             with self.store.transaction():
                 out = self._update_fact_write(

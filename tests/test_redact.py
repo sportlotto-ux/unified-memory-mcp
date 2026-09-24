@@ -53,6 +53,15 @@ def test_fact_path_redacted(ing):
     assert PLACEHOLDER_PREFIX in rows[0][0]
 
 
+def test_update_fact_path_redacted(ing):
+    fid = ing.remember_fact("cred", "deploy", "old body")
+    ing.update_fact(fid, body="new api_key=sk-UPDATESECRET1234567890")
+    assert _leaked(ing.store, "sk-UPDATESECRET1234567890") == []
+    body = ing.store.select(
+        "SELECT body FROM um_facts WHERE valid_until=0")[0][0]
+    assert PLACEHOLDER_PREFIX in body
+
+
 def test_prefix_preserved_not_just_deleted(ing):
     ing.remember_message("s", "user", "use api_key=sk-KEEPME1234567890ABCDEF now")
     body = ing.store.select("SELECT content FROM um_messages")[0][0]
