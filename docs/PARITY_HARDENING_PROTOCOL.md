@@ -543,6 +543,66 @@ read-paths; отказ `parse_ref` — до чтения; новый код не
 **Validation:** полный suite на Python 3.14 и 3.12, `git diff --check`, wheel
 build/install/import smoke из clean venv.
 
+## 5.4 P2.4 — Scratchpad/task progress (reuse um_facts)
+
+**Use case:** агент ведёт короткие задачи с прогрессом (что делаю, что
+готово) без внешних трекеров: создал → двигает статусы → закрывает →
+переоткрывает; список открытых — одним вызовом.
+
+**Проблема:** прогресс задач негде хранить внутри памяти: либо факты-мусор
+без статусов, либо внешний трекер вне export/import и owner-изоляции.
+
+**Пользовательский эффект:** `mem_task(op=create|status|list)` поверх
+слот-фактов `category="task"`: `create(name, body)` → статус `open`;
+`status(id, new)` двигает по машине
+`open→{doing,blocked,done}`, `doing→{open,blocked,done}`,
+`blocked→{open,doing,done}`, `done→{open}`; повтор живого имени — отказ;
+`list(status?)` — живые задачи владельца. Статус виден в `mem_get`
+через `metadata`, переживает export/import.
+
+**Scope:**
+
+- без новых таблиц: задача — обычный `um_facts` slot `(owner,"task",name)`;
+- статус в `metadata_json` live-строки (`{"status": ...}`), смена статуса —
+  metadata-only in-place (без supersede, без переэмбедда);
+- один новый тул `mem_task` (non-idempotent write, как `mem_fact`);
+- `_upsert_fact` переносит `metadata_json` старой версии в новую
+  (иначе правка тела через `mem_update` молча сносила бы статус);
+- текст `name`/`body` через redaction-гейт `Ingest._clean`;
+- owner-изоляция слотов как у фактов (legacy `""` видит всё);
+- `mem_get`/`mem_annotate`/`mem_validate`/`mem_forget(kind=fact)` работают
+  с задачами бесплатно, без кода.
+
+**Non-goals:**
+
+- session partition (у `um_facts` нет `session_id` — owner-scope, как в P2.1);
+- история статусов, дедлайны/TTL для задач, приоритеты/ordering;
+- task-ops в `mem_batch`; исключение задач из recall (legacy ranking свят);
+- автоперенос upstream `scratchpad` (остаётся `not_in_scope`);
+- фоновый worker/scheduler.
+
+**Красные тесты** (`tests/test_tasks.py`, 6 шт.): create+list(open),
+переходы + reopen + отказ `done→doing`, rejects (пустое/дубль/чужой/
+неизвестный статус), owner isolation + legacy, redaction,
+export/import статуса + перенос `metadata_json` при supersede.
+
+**Acceptance criteria:**
+
+- невалидный переход/статус — `ValueError` без записи;
+- повтор `create` живого имени — отказ (не silent-дубль);
+- тот же статус — no-op `changed: false`;
+- default recall ranking, legacy owner semantics, archive behavior не меняются;
+- export/import несут статус без лютых remap-хаков (обычные fact-строки).
+
+**Rollback/failure behavior:** отказ до записи; всё в `Store.transaction()`;
+in-place metadata update трогает только одну live-строку своего слота.
+
+**Docs/config impact:** `README.md` (22 тула), `CHANGELOG.md`, status log;
+новых `UM_*`, миграций, изменений `IMPORT.md` нет.
+
+**Validation:** полный suite на Python 3.14 и 3.12, `git diff --check`, wheel
+build/install/import smoke из clean venv.
+
 ## 6. Story template
 
 Каждая story должна иметь этот блок до начала кода:
@@ -589,6 +649,7 @@ Validation:
 | P2.1 working TTL | done | `bc2aec3` | working slot-fact TTL, lazy expiry through existing vector/FTS lifecycle, opt-in bounded assembly, owner semantics preserved; full suite 375/4 (3.14), 359/7 (3.12), wheel smoke OK |
 | P2.2 annotations | done (uncommitted) | — | um_annotations metadata-only layer, mem_annotate/mem_get/mem_forget, cascade + export/import remap, recall invariant; full suite 382/4 (3.14), wheel smoke OK |
 | P2.3 validate | done (uncommitted) | — | run_validate + mem_validate read-only collation (cite/conflicts/live links/annotations), verdict-free, no new tables/config; full suite 388/4 (3.14), wheel smoke OK |
+| P2.4 tasks | done (uncommitted) | — | mem_task over category="task" slots, status machine in metadata_json, supersede carry-over, no new tables, recall invariant; full suite 394/4 (3.14), wheel smoke OK |
 
 ## 9. Final gate
 

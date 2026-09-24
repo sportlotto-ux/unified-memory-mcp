@@ -7,6 +7,7 @@ v0.1: синхронный sqlite3, WAL, single-writer через коротки
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 import struct
@@ -311,6 +312,26 @@ LINK_TABLES = ("um_messages", "um_facts", "um_summaries", "um_edges")
 # P2.2: пометки поверх тех же 4 таблиц. Расширение kind — миграцией (CHECK + DDL).
 ANNOTATION_KINDS = ("useful", "disputed", "correction", "note")
 ANNOTATION_TABLES = LINK_TABLES
+
+# P2.4: задачи поверх um_facts category="task". Статус — в metadata_json
+# live-строки; смена статуса metadata-only (без supersede).
+TASK_CATEGORY = "task"
+TASK_STATUSES = ("open", "doing", "blocked", "done")
+TASK_TRANSITIONS = {
+    "open": ("doing", "blocked", "done"),
+    "doing": ("open", "blocked", "done"),
+    "blocked": ("open", "doing", "done"),
+    "done": ("open",),
+}
+
+
+def _task_status_of(metadata_json: str) -> str:
+    """Статус задачи из metadata_json; отсутствие = open (backward compat)."""
+    try:
+        status = (json.loads(metadata_json or "{}") or {}).get("status", "open")
+    except (ValueError, AttributeError):
+        return "open"
+    return status if status in TASK_STATUSES else "open"
 
 
 _LINK_CHECK_PATTERNS = (
@@ -825,10 +846,10 @@ class Store:
         importance = max(0.0, min(1.0, importance))  # кап вместо жёстких 0.95
         now = time.time()
         row = self.conn.execute(
-            "SELECT id, body, importance FROM um_facts WHERE owner=? AND category=?"
+            "SELECT id, body, importance, metadata_json FROM um_facts WHERE owner=? AND category=?"
             " AND name=? AND valid_until=0", (owner, category, name)).fetchone()
         if row is not None:
-            fid, old_body, old_imp = row
+            fid, old_body, old_imp, old_meta = row
             if old_body == body:
                 if abs(old_imp - importance) > 1e-9:
                     self.conn.execute(
@@ -845,9 +866,11 @@ class Store:
                     (now, now, fid))
                 cur = self.conn.execute(
                     "INSERT INTO um_facts(owner, category, name, body, importance,"
-                    " created_at, updated_at, valid_until, superseded_by)"
-                    " VALUES(?,?,?,?,?,?,?,0,0)",
-                    (owner, category, name, body, importance, now, now))
+                    " created_at, updated_at, valid_until, superseded_by,"
+                    " metadata_json)"
+                    " VALUES(?,?,?,?,?,?,?,0,0,?)",
+                    (owner, category, name, body, importance, now, now,
+                     old_meta or ""))
             except sqlite3.IntegrityError:
                 self._abort()
                 if _depth >= 1:
@@ -2233,6 +2256,85 @@ class Store:
         self.conn.execute("DELETE FROM um_annotations WHERE id=?", (int(aid),))
         self._commit_if(_commit)
         return True
+
+    @_locked
+    def task_create_slot(self, name: str, body: str, owner: str = "",
+                         _commit: bool = True) -> int:
+        """P2.4: новая задача. Живой слот с тем же именем — отказ (не дубль)."""
+        live = self.conn.execute(
+            "SELECT id FROM um_facts WHERE owner=? AND category=?"
+            " AND name=? AND valid_until=0",
+            (owner, TASK_CATEGORY, name)).fetchone()
+        if live:
+            raise ValueError(
+                f"task {name!r} already exists (id={live[0]});"
+                " use mem_task(op='status'|'list') instead of re-creating")
+        out = self._upsert_fact(TASK_CATEGORY, name, body, 0.5, owner,
+                                _commit=False)
+        self.conn.execute(
+            "UPDATE um_facts SET metadata_json=? WHERE id=?",
+            (json.dumps({"status": "open"}, ensure_ascii=False), out["id"]))
+        self._commit_if(_commit)
+        return out["id"]
+
+    @_locked
+    def set_task_status(self, fid: int, status: str, owner: str = "",
+                        _commit: bool = True) -> dict:
+        """P2.4: смена статуса — metadata-only in-place, без supersede."""
+        if status not in TASK_STATUSES:
+            raise ValueError(f"unknown status {status!r}: {list(TASK_STATUSES)}")
+        row = self.conn.execute(
+            "SELECT owner, category, metadata_json, valid_until"
+            " FROM um_facts WHERE id=?", (int(fid),)).fetchone()
+        if row is None:
+            raise ValueError(f"task {fid} not found")
+        r_owner, cat, meta, valid_until = row
+        if cat != TASK_CATEGORY:
+            raise ValueError(f"fact {fid} is not a task (category={cat!r})")
+        if valid_until != 0:
+            raise ValueError(f"task {fid} is not live")
+        if (r_owner or "") != owner:
+            raise ValueError(f"task {fid} owner mismatch")
+        current = _task_status_of(meta or "")
+        if current == status:
+            return {"id": int(fid), "status": status, "changed": False}
+        if status not in TASK_TRANSITIONS[current]:
+            raise ValueError(
+                f"illegal transition {current!r} → {status!r}")
+        try:
+            payload = json.loads(meta or "{}") or {}
+        except ValueError:
+            payload = {}
+        payload["status"] = status
+        self.conn.execute(
+            "UPDATE um_facts SET metadata_json=?, updated_at=? WHERE id=?",
+            (json.dumps(payload, ensure_ascii=False), time.time(), int(fid)))
+        self._commit_if(_commit)
+        return {"id": int(fid), "status": status, "changed": True}
+
+    @_locked
+    def task_list(self, owner: str = "", status: str = "",
+                  limit: int = 50) -> list[dict]:
+        """P2.4: живые задачи. owner задан — только его; '' — legacy без фильтра."""
+        if status and status not in TASK_STATUSES:
+            raise ValueError(f"unknown status {status!r}: {list(TASK_STATUSES)}")
+        sql = ("SELECT id, name, body, metadata_json, created_at, updated_at"
+               " FROM um_facts WHERE category=? AND valid_until=0")
+        params: list[object] = [TASK_CATEGORY]
+        if owner:
+            sql += " AND owner=?"
+            params.append(owner)
+        sql += " ORDER BY id LIMIT ?"
+        params.append(max(1, int(limit)))
+        out = []
+        for fid, name, body, meta, created, updated in self.conn.execute(
+                sql, params):
+            st = _task_status_of(meta or "")
+            if status and st != status:
+                continue
+            out.append({"id": fid, "name": name, "body": body, "status": st,
+                        "created_at": created, "updated_at": updated})
+        return out
 
     @_locked
     def node_ok(self, table: str, oid: int, owner: str = "",

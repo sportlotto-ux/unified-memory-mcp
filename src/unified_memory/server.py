@@ -2,7 +2,7 @@
 
 Tools: mem_remember mem_fact mem_annotate mem_link mem_graph_query mem_recall
        mem_expand mem_get mem_inspect mem_compact mem_forget mem_status mem_doctor
-       mem_validate
+       mem_validate mem_task
 
 Run: python -m unified_memory.server  (stdio transport)
 """
@@ -569,6 +569,29 @@ def mem_validate(target: str, claim: str = "", owner: str = "") -> str:
                        partial=cfg.evidence_partial,
                        archived_fetch=_archive_fetch(cfg))
     return json.dumps(out, ensure_ascii=False)
+
+
+@mcp.tool(annotations=_ann())
+def mem_task(op: str = "list", name: str = "", body: str = "",
+             status: str = "", id: int = 0, limit: int = 50,
+             owner: str = "") -> str:
+    """Task progress over slot-facts (P2.4). op=create (name+body → open) |
+    op=status (id+status: open/doing/blocked/done, done reopens only to open) |
+    op=list (live tasks, optional status filter). Tasks are category='task'
+    facts: mem_get/mem_annotate/mem_validate/mem_forget(kind=fact) apply."""
+    ing = _ingest()
+    if op == "create":
+        return json.dumps(ing.task_create(name, body, owner),
+                          ensure_ascii=False)
+    if op == "status":
+        return json.dumps(ing.task_status(int(id), status, owner),
+                          ensure_ascii=False)
+    if op == "list":
+        if limit < 1 or limit > 500:
+            raise ValueError("limit must be between 1 and 500")
+        return json.dumps({"tasks": ing.task_list(owner, status, limit)},
+                          ensure_ascii=False)
+    raise ValueError(f"unknown op {op!r}: create | status | list")
 
 
 @mcp.tool(annotations=_ann(destr=True))

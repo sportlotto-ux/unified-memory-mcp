@@ -205,6 +205,40 @@ class Ingest:
             target_table, int(target_id), kind, value, source,
             confidence, owner, _commit=False)
 
+    def task_create(self, name: str, body: str, owner: str = "",
+                    _commit: bool = True) -> dict:
+        """P2.4: новая задача (category='task', статус open). Текст — через _clean."""
+        name = self._clean(name or "")
+        body = self._clean(body or "")
+        if not name.strip():
+            raise ValueError("task name is required")
+        if not body.strip():
+            raise ValueError("task body is required")
+        if _commit:
+            with self.store.transaction():
+                fid = self.store.task_create_slot(
+                    name, body, owner, _commit=False)
+                self._embed_fact(fid, _commit=False)
+        else:
+            fid = self.store.task_create_slot(name, body, owner, _commit=False)
+            self._embed_fact(fid, _commit=False)
+        return {"id": fid, "status": "open", "created": True}
+
+    def task_status(self, fid: int, status: str, owner: str = "",
+                    _commit: bool = True) -> dict:
+        """P2.4: смена статуса задачи (машина переходов — в Store)."""
+        if _commit:
+            with self.store.transaction():
+                return self.store.set_task_status(
+                    int(fid), status, owner, _commit=False)
+        return self.store.set_task_status(int(fid), status, owner,
+                                          _commit=False)
+
+    def task_list(self, owner: str = "", status: str = "",
+                  limit: int = 50) -> list[dict]:
+        """P2.4: живые задачи владельца (read-only, без транзакции)."""
+        return self.store.task_list(owner, status, limit)
+
     def batch(self, ops: list[dict], dry_run: bool = False,
               owner: str = "") -> dict:
         """Атомарный батч записей (v0.7-п.5b). Все op в одном контуре; ошибка

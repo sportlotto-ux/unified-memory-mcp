@@ -19,6 +19,9 @@
 - P2.3: `mem_validate` read-only collation (cite if claim + conflicts over
   target and direct supports/contradicts neighbours + live links +
   annotations); verdict-free, `needs_judgment` always true.
+- P2.4: `mem_task` progress over `category="task"` slot-facts (open/doing/
+  blocked/done machine, metadata-only status, `metadata_json` carried over
+  supersede); no new tables, recall ranking unchanged.
 - Migration metadata columns for source references, confidence, veracity, and
   tool metadata; export/import and `mem_get` preserve them.
 
