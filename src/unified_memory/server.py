@@ -19,10 +19,7 @@ try:
 except ImportError:  # прямой запуск файлом: src/unified_memory/server.py
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
-try:  # mcp 2.x: FastMCP renamed to MCPServer
-    from mcp.server.mcpserver import MCPServer as _Server
-except ImportError:  # mcp 1.x
-    from mcp.server.fastmcp import FastMCP as _Server  # type: ignore
+from mcp.server.mcpserver import MCPServer as _Server
 
 from mcp.types import ToolAnnotations  # noqa: E402
 
