@@ -2,8 +2,9 @@
 
 Формат (строка = один JSON-объект, \n-разделённые):
   1-я строка — header: {"format":"um-export-jsonl", "schema_version", "exported_at",
-                        "source_db", "counts"}
+                        "source_db", "counts", "complete": true}
   далее      — {"table": <имя>, "row": {...}} по объекту на строку.
+  последняя  — {"format":"um-export-jsonl-complete"}.
 
 Что внутри: контент + um_links, вектора base64 (lossless). um_fts — исключён
 (производный; перестраивается _fts_index при импорте, иначе пришлось бы ремаппить
@@ -24,6 +25,7 @@ from pathlib import Path
 from .store import Store
 
 FORMAT = "um-export-jsonl"
+COMPLETE_FORMAT = "um-export-jsonl-complete"
 
 # Контент-таблицы в стабильном порядке. um_fts/um_vecidx — производные
 # (см. docstring), в дамп не входят.
@@ -64,7 +66,7 @@ def export_store(store: Store, path: str | Path | None = None) -> dict:
         header = {"format": FORMAT,
                   "schema_version": store.meta_get("schema_version") or "1",
                   "exported_at": time.time(), "source_db": store._db_path,
-                  "counts": counts}
+                  "counts": counts, "complete": True}
         written = 0
         try:
             with tempfile.NamedTemporaryFile(
@@ -81,6 +83,9 @@ def export_store(store: Store, path: str | Path | None = None) -> dict:
                                           ensure_ascii=False) + "\n"
                         f.write(line)
                         written += len(line.encode("utf-8"))
+                footer = json.dumps({"format": COMPLETE_FORMAT}, ensure_ascii=False) + "\n"
+                f.write(footer)
+                written += len(footer.encode("utf-8"))
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp_path, out_path)

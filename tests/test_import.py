@@ -7,7 +7,7 @@ import pytest
 from fake_backend import FakeBackend
 
 from unified_memory.config import Config
-from unified_memory.export import export_store
+from unified_memory.export import COMPLETE_FORMAT, export_store
 from unified_memory.import_dump import import_dump, read_dump
 from unified_memory.ingest import Ingest
 from unified_memory.store import Store
@@ -46,7 +46,7 @@ def _fresh(tmp_path, name="dst.db"):
 
 def _header(sv="1"):
     return {"format": "um-export-jsonl", "schema_version": sv, "exported_at": 0,
-            "counts": {}}
+            "counts": {}, "complete": True}
 
 
 def _write(tmp_path, name, header, rows):
@@ -55,6 +55,7 @@ def _write(tmp_path, name, header, rows):
         f.write(json.dumps(header) + "\n")
         for r in rows:
             f.write(json.dumps(r) + "\n")
+        f.write(json.dumps({"format": COMPLETE_FORMAT}) + "\n")
     return p
 
 
@@ -157,6 +158,23 @@ def test_newer_schema_version_rejected(tmp_path):
     try:
         with pytest.raises(ValueError, match="schema_version"):
             import_dump(dst, p)
+    finally:
+        dst.close()
+
+
+def test_incomplete_jsonl_rejected_before_import(tmp_path):
+    header = _header()
+    header["counts"] = {"um_facts": 2}
+    p = tmp_path / "partial.jsonl"
+    p.write_text(
+        json.dumps(header) + "\n" + json.dumps(_fact_row(1)) + "\n",
+        encoding="utf-8",
+    )
+    dst = _fresh(tmp_path)
+    try:
+        with pytest.raises(ValueError, match="incomplete"):
+            import_dump(dst, p)
+        assert dst.conn.execute("SELECT count(*) FROM um_facts").fetchone()[0] == 0
     finally:
         dst.close()
 

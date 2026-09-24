@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from unified_memory.export import export_store
+from unified_memory.export import COMPLETE_FORMAT, export_store
 
 CONTENT = {"um_messages", "um_summaries", "um_facts", "um_entities",
            "um_edges", "um_links", "um_vectors", "um_meta"}
@@ -26,7 +26,9 @@ def srv(tmp_path, monkeypatch):
 
 def _read_jsonl(path):
     lines = Path(path).read_text(encoding="utf-8").splitlines()
-    return json.loads(lines[0]), [json.loads(x) for x in lines[1:]]
+    payload = [json.loads(x) for x in lines]
+    assert payload[-1] == {"format": COMPLETE_FORMAT}
+    return payload[0], payload[1:-1]
 
 
 def _counts(m):

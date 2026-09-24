@@ -33,6 +33,7 @@ import json
 from pathlib import Path
 
 from .config import load
+from .export import COMPLETE_FORMAT
 from .store import Store, vec_extension_available
 
 FORMAT = "um-export-jsonl"
@@ -93,15 +94,35 @@ def read_dump(path: str | Path) -> tuple[str, dict[str, list[dict]]]:
     except json.JSONDecodeError:
         raise ValueError("dump is neither JSONL nor JSON: bad first line")
     if isinstance(head, dict) and head.get("format") == FORMAT:
+        body_lines = [ln for ln in lines[1:] if ln.strip()]
+        complete = False
+        if body_lines:
+            try:
+                last = json.loads(body_lines[-1])
+            except json.JSONDecodeError as e:
+                if head.get("complete") is True:
+                    raise ValueError("incomplete dump: invalid completion marker") from e
+            else:
+                if isinstance(last, dict) and last.get("format") == COMPLETE_FORMAT:
+                    complete = True
+                    body_lines.pop()
+        if head.get("complete") is True and not complete:
+            raise ValueError("incomplete dump: missing completion marker")
         tables: dict[str, list[dict]] = {}
-        for ln in lines[1:]:
-            if not ln.strip():
-                continue
+        for ln in body_lines:
             obj = json.loads(ln)
             t = obj.get("table")
             if t not in KNOWN:
                 raise ValueError(f"unknown table {t!r} in dump")
             tables.setdefault(t, []).append(obj["row"])
+        if head.get("complete") is True:
+            counts = head.get("counts") or {}
+            actual = {table: len(rows) for table, rows in tables.items()}
+            for table, expected in counts.items():
+                if actual.get(table, 0) != int(expected):
+                    raise ValueError(
+                        f"incomplete dump: count mismatch for {table} "
+                        f"(expected {expected}, got {actual.get(table, 0)})")
         return str(head.get("schema_version") or ""), tables
     if isinstance(head, dict) and "tables" in head:  # legacy: весь файл одним JSON
         payload = json.loads(raw)
