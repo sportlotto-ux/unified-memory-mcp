@@ -32,7 +32,8 @@ def rrf_fuse(rank_lists: list[list[Hit]], k: int = _RRF_K) -> list[Hit]:
     for (ot, oid), s in ordered:
         h = keep[(ot, oid)]
         out.append(Hit(h.owner_table, h.owner_id, h.body, s, h.session_id,
-                       h.extra, snippet=h.snippet))
+                       h.extra, h.created_at, snippet=h.snippet,
+                       archived=h.archived))
     return out
 
 
@@ -56,13 +57,17 @@ class Router:
                include_expired: bool = False,
                as_of: float | None = None,
                hops: int = 1, rel: str = "",
-               diagnostics: bool = False) -> list[Hit]:
+               diagnostics: bool = False,
+               source: str = "",
+               include_archived: bool = False) -> list[Hit]:
         if scope not in VALID_SCOPES:
             raise ValueError(f"unknown scope {scope!r}: {VALID_SCOPES}")
         if limit <= 0:
             return []
         if scope == "session" and not session_id:
             return []  # #5: без session_id граф/поиск вернули бы чужие данные
+        if source and scope == "facts":
+            return []
         self.last_stats = {"dim_skipped": 0}
         lists: list[list[Hit]] = []
         vec_hits: list[Hit] = []
@@ -70,16 +75,28 @@ class Router:
         t0 = time.perf_counter() if diagnostics else 0.0
         fts_hits = self.store.fts_search(query, scope=scope, session_id=session_id,
                                          limit=limit * 2, owner=owner,
-                                         include_expired=include_expired, as_of=as_of)
+                                         include_expired=include_expired, as_of=as_of,
+                                         source=source)
         if fts_hits:
             lists.append(fts_hits)
         if diagnostics:
             timing["fts_ms"] = round((time.perf_counter() - t0) * 1000, 3)
             t0 = time.perf_counter()
+        archive_hits: list[Hit] = []
+        if include_archived:
+            archive_hits = self._archive_hits(
+                query, scope, session_id, limit, owner, source)
+            if archive_hits:
+                lists.append(archive_hits)
+            if diagnostics:
+                timing["archive_ms"] = round((time.perf_counter() - t0) * 1000, 3)
+                t0 = time.perf_counter()
         if self.backend is not None:
             qv = self.backend.embed_query(query)
             tables = {"all": None, "session": ["um_messages", "um_summaries", "um_edges"],
                       "facts": ["um_facts"]}[scope]
+            if source:
+                tables = ["um_messages"]
             # v0.4-п.6: KNN-кандидаты из vec0 + ТОЧНЫЙ косинусный перескоринг
             # (порядок L2 == порядку косинуса на нормализованных векторах;
             # шкала оценок не меняется — паритет с brute force).
@@ -100,6 +117,11 @@ class Router:
                 cand = [(ot, oid, vec) for ot, oid, vec in all_vecs
                         if len(vec) == len(qv)]
                 self.last_stats["dim_skipped"] = len(all_vecs) - len(cand)
+            if source and cand:
+                source_map = self.store.sources_for(
+                    [(ot, oid) for ot, oid, _ in cand])
+                cand = [item for item in cand
+                        if source_map.get((item[0], item[1])) == source]
             if cand and as_of is not None:
                 win = self.store.window_for([(ot, oid) for ot, oid, _ in cand])
                 cand = [(ot, oid, v) for ot, oid, v in cand
@@ -132,9 +154,14 @@ class Router:
             t0 = time.perf_counter()
         if hops is None:  # defensive: прямые вызовы Router (MCP валидирует тип)
             hops = 1
-        if hops > 1:
+        if source:
+            # Source is a message-level provenance filter; graph nodes have no
+            # source dimension and must not bypass it.
+            graph_hits = []
+        elif hops > 1:
             # guardrail 1: старый _graph_arm не тронут; BFS — отдельная ветка.
-            seeds = [(h.owner_table, h.owner_id) for lst in lists for h in lst]
+            seeds = [(h.owner_table, h.owner_id) for lst in lists for h in lst
+                     if not h.archived]
             graph_hits = self._graph_bfs(query, scope, session_id, limit * 2,
                                          owner, include_expired, as_of, hops,
                                          rel, seeds)
@@ -163,13 +190,15 @@ class Router:
             if scope == "all" and session_id and h.session_id == session_id:
                 score *= 1.0 + self.cfg.scope_bias
             adjusted.append(Hit(h.owner_table, h.owner_id, h.body, score,
-                                h.session_id, h.extra, ts, snippet=h.snippet))
+                                h.session_id, h.extra, ts, snippet=h.snippet,
+                                archived=h.archived))
         adjusted.sort(key=lambda h: -h.score)
         self.last_stats["reranked"] = len(adjusted)
         final = self._mmr(adjusted, limit)
         if diagnostics:
             keys = {(h.owner_table, h.owner_id) for h in final}
-            arms = {"fts": fts_hits, "vectors": vec_hits, "graph": graph_hits}
+            arms = {"fts": fts_hits, "vectors": vec_hits,
+                    "archive": archive_hits, "graph": graph_hits}
             self.last_stats["diagnostics"] = {
                 "arms": {k: len(v) for k, v in arms.items()},       # до RRF
                 "contrib": {k: len({(h.owner_table, h.owner_id) for h in v} & keys)
@@ -185,6 +214,26 @@ class Router:
                              "dim_skipped": self.last_stats.get("dim_skipped", 0)},
             }
         return final
+
+    def _archive_hits(self, query: str, scope: str, session_id: str,
+                      limit: int, owner: str, source: str) -> list[Hit]:
+        """Read an existing cold archive without creating or mutating it."""
+        path = self.cfg.archive_path
+        if not path.exists():
+            return []
+        from . import archive
+        conn = archive.open_archive_readonly(path)
+        try:
+            rows = archive.search_messages(
+                conn, query, scope=scope, session_id=session_id,
+                limit=limit * 2, owner=owner, source=source,
+                max_scan=self.cfg.archive_recall_scan, label=str(path))
+        finally:
+            conn.close()
+        return [Hit("um_messages", row["id"], row["content"], 1.0,
+                    row["session_id"], row.get("archive_ref", ""),
+                    row["created_at"], archived=True)
+                for row in rows]
 
     def _mmr(self, hits: list[Hit], limit: int) -> list[Hit]:
         """MMR по Жаккару токенов тел: дубли parent/children не забивают топ.

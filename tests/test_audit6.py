@@ -44,6 +44,23 @@ def test_fts_session_scope_not_starved_after_global_limit(tmp_path):
         s.close()
 
 
+def test_fts_source_scope_not_starved_after_global_limit(tmp_path):
+    """Source filter must run before the global FTS candidate limit."""
+    s = _store(tmp_path)
+    try:
+        if not s.fts:
+            pytest.skip("FTS5 unavailable")
+        for _ in range(100):
+            s.add_message("current", "user", "zebra", source="other")
+        target = s.add_message("current", "user", "zebra " + "filler " * 2000,
+                               source="wanted")
+        hits = s.fts_search("zebra", scope="session", session_id="current",
+                            source="wanted", limit=10)
+        assert ("um_messages", target) in {(h.owner_table, h.owner_id) for h in hits}
+    finally:
+        s.close()
+
+
 def test_fts_owner_scope_not_starved_after_global_limit(tmp_path):
     """Owner filter must run before the global FTS candidate limit."""
     s = _store(tmp_path)

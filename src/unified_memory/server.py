@@ -168,12 +168,17 @@ def mem_recall(query: str, scope: str = "all", session_id: str = "",
                limit: int = 10, owner: str = "",
                include_expired: bool = False, as_of: str = "",
                hops: int = 1, rel: str = "",
-               diagnostics: bool = False) -> str:
+               diagnostics: bool = False, source: str = "",
+               include_archived: bool = False) -> str:
     """Unified search: FTS + vectors + RRF. Scope: all | session | facts.
     Истёкшие (valid_until) прячутся (include_expired=True — аудит истории).
     as_of (ISO-date) — срез графа на дату: valid_from <= as_of < valid_until.
     hops>1 — BFS по типизированным связям и entity-графу (ADR-001); rel фильтрует
     связи (`supports`/`contradicts`/`supersedes`/`derives_from`; на рёбрах — predicate).
+    source фильтрует только messages по их source; facts/summaries/graph не имеют
+    source dimension и исключаются из такого recall.
+    include_archived=true добавляет bounded lexical search по cold archive;
+    default false сохраняет hot-only recall.
     diagnostics=true → {"hits": [...], "diagnostics": {arms/contrib/timings/bfs/degraded}};
     false — ровно прежний список (аддитивность)."""
     ing = _ingest()
@@ -187,7 +192,8 @@ def mem_recall(query: str, scope: str = "all", session_id: str = "",
     router = ing.router()
     hits = router.recall(query, scope, session_id, limit, owner,
                          include_expired, as_of_ts, hops, rel,
-                         diagnostics=diagnostics)
+                         diagnostics=diagnostics, source=source,
+                         include_archived=include_archived)
     out = []
     for h in hits:
         if h.snippet and len(h.body) > 2000:  # A4: сниппет только для ДЛИННЫХ FTS-тел
@@ -196,9 +202,13 @@ def mem_recall(query: str, scope: str = "all", session_id: str = "",
             body = h.body[:2000]
             if len(h.body) > 2000:
                 body += "…[truncated, use mem_expand for full text]"
-        out.append({"kind": h.owner_table, "id": h.owner_id,
-                    "score": round(h.score, 4), "session": h.session_id,
-                    "body": body})
+        item = {"kind": h.owner_table, "id": h.owner_id,
+                "score": round(h.score, 4), "session": h.session_id,
+                "body": body}
+        if h.archived:
+            item["archived"] = True
+            item["archive_ref"] = h.extra
+        out.append(item)
     if diagnostics:
         return json.dumps({"hits": out,
                            "diagnostics": router.last_stats.get("diagnostics", {})},

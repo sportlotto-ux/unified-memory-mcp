@@ -14,6 +14,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from .file_permissions import ensure_private_parent, restrict_new_sqlite_files
+from .store import tokenize
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS ar_messages(
@@ -52,6 +53,15 @@ def open_archive(path) -> sqlite3.Connection:
     conn.commit()
     restrict_new_sqlite_files(p, seen)
     return conn
+
+
+def open_archive_readonly(path) -> sqlite3.Connection:
+    """Open an existing archive without creating or migrating the file."""
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(p)
+    uri = f"file:{quote(str(p), safe='/:')}?mode=ro"
+    return sqlite3.connect(uri, uri=True)
 
 
 def audit(store, path) -> dict:
@@ -144,6 +154,50 @@ def fetch_message(conn: sqlite3.Connection, mid: int) -> dict | None:
         return None
     return dict(zip(["session_id", "owner", "role", "content",
                      "created_at", "source"], r))
+
+
+def search_messages(conn: sqlite3.Connection, query: str, scope: str = "all",
+                    session_id: str = "", limit: int = 20, owner: str = "",
+                    source: str = "", max_scan: int = 2000,
+                    label: str = "") -> list[dict]:
+    """Bounded cold-message search; scope filters run before the scan cap."""
+    if scope == "facts":
+        return []
+    terms = tokenize(query)
+    if not terms or limit <= 0 or max_scan <= 0:
+        return []
+    conditions = []
+    params: list = []
+    if scope == "session":
+        if not session_id:
+            return []
+        conditions.append("session_id=?")
+        params.append(session_id)
+    if owner:
+        conditions.append("owner=?")
+        params.append(owner)
+    if source:
+        conditions.append("source=?")
+        params.append(source)
+    where = " AND ".join(conditions) or "1"
+    term_where = " OR ".join(["content LIKE ?"] * min(6, len(terms)))
+    term_params = [f"%{term}%" for term in terms[:6]]
+    sql = (
+        "SELECT id, session_id, owner, role, content, created_at, source"
+        " FROM (SELECT id, session_id, owner, role, content, created_at, source"
+        f"       FROM ar_messages WHERE {where}"
+        "       ORDER BY created_at DESC, id DESC LIMIT ?)"
+        f" WHERE {term_where} ORDER BY created_at DESC, id DESC LIMIT ?"
+    )
+    rows = conn.execute(sql, (*params, max_scan, *term_params, limit)).fetchall()
+    keys = ["id", "session_id", "owner", "role", "content", "created_at", "source"]
+    out = []
+    for row in rows:
+        item = dict(zip(keys, row))
+        if label:
+            item["archive_ref"] = f"{label}#{item['id']}"
+        out.append(item)
+    return out
 
 
 def status(conn: sqlite3.Connection, path) -> dict:

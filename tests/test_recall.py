@@ -25,6 +25,14 @@ def test_recall_fuses_fts_and_vectors(ing):
     assert "бюджет" in hits[0].body
 
 
+def test_recall_source_filter_excludes_other_provenance(ing):
+    ing.remember_message("s1", "user", "бюджет согласован", source="mcp")
+    ing.remember_message("s1", "user", "бюджет отозван", source="other")
+    hits = ing.router().recall("бюджет", source="mcp")
+    assert hits and all(h.owner_table == "um_messages" for h in hits)
+    assert all("отозван" not in h.body for h in hits)
+
+
 def test_recall_facts_scope(ing):
     ing.remember_fact("preference", "чай", "любит зелёный чай по утрам")
     hits = ing.router().recall("чай", scope="facts")

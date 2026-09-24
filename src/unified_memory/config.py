@@ -122,6 +122,10 @@ def _default_archive_batch() -> int:
     return _strict_int("UM_ARCHIVE_BATCH", 500)
 
 
+def _default_archive_recall_scan() -> int:
+    return _strict_int("UM_ARCHIVE_RECALL_SCAN_LIMIT", 2000)
+
+
 def _default_ev_refs() -> int:
     return _strict_int("UM_EVIDENCE_MAX_REFS", 50)
 
@@ -226,6 +230,8 @@ class Config:
     max_text_chars: int = field(default_factory=_default_max_text_chars)
     # v0.8 (D15): кап головы компакшна — вместо 1M-скана хвост берём bounded.
     compact_max_msgs: int = field(default_factory=_default_compact_max_msgs)
+    # P1.3: bounded lexical scan cap for explicit archive recall.
+    archive_recall_scan: int = field(default_factory=_default_archive_recall_scan)
 
     def __post_init__(self) -> None:
         if self.embedding_backend not in ("local", "openai"):
@@ -250,6 +256,8 @@ class Config:
             raise ValueError("UM_ARCHIVE_SIZE_MB must be > 0")
         if self.archive_batch <= 0:
             raise ValueError("UM_ARCHIVE_BATCH must be > 0")
+        if self.archive_recall_scan <= 0:
+            raise ValueError("UM_ARCHIVE_RECALL_SCAN_LIMIT must be > 0")
         if self.archive_path == self.db_path:
             raise ValueError("UM_ARCHIVE_PATH must differ from the main DB")
         if self.evidence_max_refs <= 0:

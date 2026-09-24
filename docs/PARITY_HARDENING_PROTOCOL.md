@@ -1,6 +1,6 @@
 # PARITY_HARDENING_PROTOCOL — регламент реализации unified-memory
 
-Статус: **P0.1–P0.4 и P1.1 реализованы; P1.2 в работе; изменения не закоммичены**.
+Статус: **P0.1–P0.4, P1.1, P1.2 и P1.3 реализованы; изменения P1.2/P1.3 не закоммичены**.
 
 Документ фиксирует порядок работ после аудита переноса из `hermes-lcm` и
 `mnemosyne`. Цель — не расширять API поверх известных correctness/lifecycle
@@ -282,7 +282,7 @@ raw backlog.
 - `include_archived`/явный archive query;
 - сохранение owner/session/scope filters;
 - `mem_expand` по-прежнему быстрый exact path;
-- export/import archive behavior определить отдельной строкой.
+- archive остаётся отдельным cold-файлом: hot `export` не включает archive rows/bytes, а `import` не создаёт и не восстанавливает архив; archive recovery идёт через `mem_expand`.
 
 ### P1.4 — Importance-aware ranking
 
@@ -385,8 +385,8 @@ Validation:
 | P0.3 model recovery | done (uncommitted) | — | offline `python -m unified_memory.reembed`; atomic full replacement, rollback, summaries/owner coverage; full suite 339/4 (3.14), 323/7 (3.12); wheel smoke OK |
 | P0.4 secure artifacts | done (uncommitted) | — | new private DB/archive parents and SQLite artifacts; existing permissions preserved; full suite 341/4 (3.14), 325/7 (3.12); wheel smoke OK |
 | P1.1 mem_get/inspect | done (uncommitted) | — | exact metadata/vector/links lookup; store/session diagnostics; 17-tool MCP smoke; full suite 342/4 (3.14), 326/7 (3.12); wheel smoke OK |
-| P1.2 lineage | in progress (uncommitted) | — | lineage table + mem_expand + mem_load_session + export/import; source-filter recall remains; full suite 344/4 (3.14), 328/7 (3.12); wheel smoke OK |
-| P1.3 archive recall | pending | — | after lineage decision |
+| P1.2 lineage | done (uncommitted) | — | lineage table, mem_expand, mem_load_session, export/import, source-filter recall; full suite 346/4 (3.14), 330/7 (3.12); wheel smoke OK |
+| P1.3 archive recall | done (uncommitted) | — | explicit include_archived bounded lexical scan; owner/session/source/scope filters; no archive creation on read; full suite 351/4 (3.14), 335/7 (3.12); wheel smoke OK |
 | P1.4 importance | pending | — | default-compatible |
 | P1.5 graph query | pending | — | exact graph contract |
 | P1.6 migration | pending | — | dry-run first |

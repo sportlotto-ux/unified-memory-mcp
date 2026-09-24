@@ -267,6 +267,7 @@ class Hit:
     extra: str = ""
     created_at: float = 0.0  # v0.4-п.3: штампует Router для recency-приора
     snippet: str = ""  # A4: FTS-сниппет (только FTS-плечо), тело остаётся полным
+    archived: bool = False
 
 
 # ADR-001: закрытые словари связей. Расширение — миграцией (CHECK + DDL).
@@ -1124,7 +1125,8 @@ class Store:
                    session_id: str = "", limit: int = 20,
                    owner: str = "",
                    include_expired: bool = False,
-                   as_of: float | None = None) -> list[Hit]:
+                   as_of: float | None = None,
+                   source: str = "") -> list[Hit]:
         """Полнотекст: FTS5 при наличии, иначе LIKE по токенам.
 
         Trigram-FTS не ищет термы короче 3 символов («да», «он») — для таких
@@ -1143,6 +1145,10 @@ class Store:
 
             raise ValueError(f"unknown scope {scope!r}: {VALID_SCOPES}")
         tables = tables[scope]
+        if source:
+            if scope == "facts":
+                return []
+            tables = ["um_messages"]
         if self.fts and max(len(t) for t in terms) >= 3:
             match = " OR ".join(f'"{t}"' for t in terms[:10] if len(t) >= 3)
             # The FTS table stores only (owner_table, owner_id, body), so scope
@@ -1170,6 +1176,9 @@ class Store:
                         "um_messages", "um_summaries", "um_edges"):
                     checks.append(f"{alias}.session_id=?")
                     scope_params.append(session_id)
+                if source and table == "um_messages":
+                    checks.append(f"{alias}.source=?")
+                    scope_params.append(source)
                 if table in ("um_facts", "um_edges"):
                     if as_of is not None:
                         checks.extend([
@@ -1264,6 +1273,9 @@ class Store:
             if owner and ot in ("um_messages", "um_summaries", "um_facts"):
                 cond = f"(owner=?) AND ({cond})"
                 params = [owner] + params
+            if source and ot == "um_messages":
+                cond = f"(source=?) AND ({cond})"
+                params = [source] + params
             if ot in ("um_messages", "um_summaries") and scope == "session":
                 cond = f"(session_id=?) AND ({cond})"
                 params = [session_id] + params
@@ -1545,6 +1557,19 @@ class Store:
                     f"SELECT id, owner FROM {ot} WHERE id IN ({ph})", oids):
                 out[(ot, oid)] = own or ""
         return out
+
+    @_locked
+    def sources_for(self, refs: list[tuple[str, int]]) -> dict[tuple[str, int], str]:
+        """Batch message source values for recall filtering."""
+        ids = [oid for ot, oid in refs if ot == "um_messages"]
+        if not ids:
+            return {}
+        ph = ",".join("?" * len(ids))
+        return {
+            ("um_messages", oid): source or ""
+            for oid, source in self.conn.execute(
+                f"SELECT id, source FROM um_messages WHERE id IN ({ph})", ids)
+        }
 
     @_locked
     def recent(self, start_ts: float, end_ts: float, session_id: str = "",

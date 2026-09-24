@@ -11,12 +11,12 @@ from unified_memory.store import Store
 SRC = pathlib.Path(__file__).resolve().parents[1] / "src" / "unified_memory"
 
 
-def test_dead_cold_api_removed():
-    # archive.search удалён целиком
+def test_old_cold_api_name_removed():
+    # P1.3 keeps the new explicit search_messages API; the old dead API name
+    # archive.search must not return.
     assert "def search(" not in (SRC / "archive.py").read_text(encoding="utf-8")
-    # include_archived не воскрес нигде
-    for p in SRC.glob("*.py"):
-        assert "include_archived" not in p.read_text(encoding="utf-8"), p.name
+    assert "include_archived" in (SRC / "server.py").read_text(encoding="utf-8")
+    assert "include_archived" in (SRC / "recall.py").read_text(encoding="utf-8")
 
 
 @pytest.fixture
