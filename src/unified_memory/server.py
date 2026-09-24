@@ -71,7 +71,9 @@ def _ingest():
                     _STATE["backend_error"] = f"{type(e).__name__}: {e}"[:300]
                 store = Store(cfg,
                               embedding_dim=backend.dim if backend else 0,
-                              embedding_model=cfg.embedding_model if backend else "")
+                              embedding_model=(getattr(backend, "model_name",
+                                                       cfg.embedding_model)
+                                                if backend else ""))
                 _STATE.update(store=store, cfg=cfg,
                               ingest=Ingest(store, backend, default_summarizer(), cfg))
                 _maybe_maintenance(store, cfg)  # ленивый weekly-purge + порог архива
@@ -468,7 +470,9 @@ def mem_status() -> str:
     return json.dumps({**ing.store.stats(),
                        "vectors_enabled": ing.backend is not None,
                        "embedding_backend": cfg.embedding_backend,
-                       "embedding_model": cfg.embedding_model,
+                       "embedding_model": (getattr(ing.backend, "model_name",
+                                                     cfg.embedding_model)
+                                           if ing.backend else cfg.embedding_model),
                        "embedding_dim": ing.backend.dim if ing.backend else 0,
                        "redaction_enabled": cfg.redact_enabled,
                        "redaction_patterns": list(cfg.redact_patterns),

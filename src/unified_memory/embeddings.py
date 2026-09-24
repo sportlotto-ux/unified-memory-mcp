@@ -233,7 +233,7 @@ def make_backend(cfg) -> EmbeddingBackend:
 
 
 def check_store_dim(expected_dim: int, model_name: str, meta_getter) -> None:
-    """Сверить dim стора с активной моделью. Вызывать при open() БД.
+    """Сверить модель и dim стора с активной моделью.
 
     ``meta_getter(key)`` читает ``um_meta``. Первый запуск (пусто) —
     записывать должен вызывающий код, здесь только проверка.
@@ -243,7 +243,7 @@ def check_store_dim(expected_dim: int, model_name: str, meta_getter) -> None:
         return  # fresh store — caller stamps it
     spec = MODEL_REGISTRY.get(stored)
     stored_dim = spec.dim if spec else int(meta_getter("embedding_dim") or 0)
-    if stored_dim != expected_dim:
+    if stored != model_name or stored_dim != expected_dim:
         raise DimensionMismatchError(
             f"store embedded with {stored!r} (dim={stored_dim}), "
             f"active model {model_name!r} (dim={expected_dim}). "

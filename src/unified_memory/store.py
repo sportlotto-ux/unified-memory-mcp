@@ -944,6 +944,16 @@ class Store:
     def add_vector(self, owner_table: str, owner_id: int,
                    vec: list[float], model: str, owner: str = "",
                    _commit: bool = True) -> None:
+        stored_model = self.meta_get("embedding_model")
+        if stored_model is None:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO um_meta(key, value) VALUES(?, ?)",
+                ("embedding_model", model))
+            self.conn.execute(
+                "INSERT OR IGNORE INTO um_meta(key, value) VALUES(?, ?)",
+                ("embedding_dim", str(len(vec))))
+        else:
+            check_store_dim(len(vec), model, self.meta_get)
         # Replace-семантика (#5): повторный embed того же owner не плодит дубли.
         self.conn.execute(
             "DELETE FROM um_vectors WHERE owner_table=? AND owner_id=?",
