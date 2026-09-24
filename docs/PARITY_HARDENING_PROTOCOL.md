@@ -772,6 +772,56 @@ export/import несёт bank+grants, миграция старой схемы.
 **Validation:** полный suite на Python 3.14 и 3.12, `git diff --check`, wheel
 build/install/import smoke из clean venv.
 
+## 5.8 P2.8 — Adaptive retrieval (per-call knobs)
+
+**Use case:** хост подстраивает ранжирование под запрос: для точного вопроса —
+`mmr_lambda=1.0` (чистая релевантность), для обзора — важность фактов
+(`importance_weight`), для сессионного контекста — `scope_bias`. Без
+перезапуска и смены глобального конфига.
+
+**Проблема:** ручки rerank (`UM_IMPORTANCE_WEIGHT`/`UM_MMR_LAMBDA`/
+`UM_SCOPE_BIAS`) — только конфиг: один набор на все запросы процесса.
+
+**Пользовательский эффект:** `mem_recall(..., importance_weight?,
+mmr_lambda?, scope_bias?)` — явные per-call значения поверх конфига;
+`None` (дефолт) = конфиг, поведение бит-в-бит. Effective values видны
+в `diagnostics`.
+
+**Scope:**
+
+- `Router.recall` принимает 3 опциональных override (в конец сигнатуры,
+  keyword, backward compatible); валидация диапазонов — как в `Config`;
+- `mem_recall` пробрасывает их 1:1 (`float | None`, дефолт `None`);
+- `diagnostics.effective` = применённые значения;
+- дефолтный ranking не меняется (все `None` = прежний кодпас).
+
+**Non-goals:**
+
+- автопереключение плеч по форме запроса (тихий выбор модели — stop);
+- annotation-сигналы в ranking (ломает acceptance P2.2);
+- новые `UM_*`, новые таблицы, смена RRF/ядер армов;
+- per-call `recency_halflife_days` (конфига достаточно).
+
+**Красные тесты** (`tests/test_adaptive.py`, 6 шт.): importance двигает
+порядок, невалидные значения — отказ, `None` == прежний вызов бит-в-бит,
+`effective` в diagnostics, эквивалент конфиг/override, mmr/scope_bias
+меняют порядок.
+
+**Acceptance criteria:**
+
+- вне диапазона — `ValueError` до поиска;
+- все `None` — байт-в-байт прежний результат на тех же данных;
+- дефолтный конфиг-ранкинг, owner/bank изоляция, archive behavior не меняются.
+
+**Rollback/failure behavior:** отказ валидации до поиска; override живёт
+только в рамках вызова, конфиг не мутирует.
+
+**Docs/config impact:** `README.md` (дока `mem_recall`, без новых тулов),
+`CHANGELOG.md`, status log; новых тулов/`UM_*`/миграций нет.
+
+**Validation:** полный suite на Python 3.14 и 3.12, `git diff --check`, wheel
+build/install/import smoke из clean venv.
+
 ## 6. Story template
 
 Каждая story должна иметь этот блок до начала кода:
@@ -822,6 +872,7 @@ Validation:
 | P2.5 persona | done (uncommitted) | — | mem_persona set/get over category="persona" slots, bounded ordered profile, no new tables, upstream persona stays not_in_scope; full suite 400/4 (3.14), wheel smoke OK |
 | P2.6 extract | done (uncommitted) | — | EndpointExtractor + mem_extract preview-only (strict JSON, caps, no writes), reuse UM_SUMMARIZER_*, loud errors, no new tables/config; full suite 406/4 (3.14), wheel smoke OK |
 | P2.7 banks | done (uncommitted) | — | um_facts.bank + um_grants read-only sharing, visibility on recall/get/expand/evidence, slot+index migration, legacy preserved; full suite 414/4 (3.14), wheel smoke OK |
+| P2.8 adaptive | done (uncommitted) | — | per-call importance/mmr/scope-bias overrides on recall+mem_recall, effective in diagnostics, defaults bitwise; full suite 420/4 (3.14), wheel smoke OK |
 
 ## 9. Final gate
 

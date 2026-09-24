@@ -52,6 +52,21 @@ class Router:
     def vectors_enabled(self) -> bool:
         return self.backend is not None
 
+    @staticmethod
+    def _override(name: str, value: float | None, default: float,
+                  lo: float, hi: float | None) -> float:
+        """P2.8: per-call knob. None = конфиг; иначе float + границы конфига."""
+        if value is None:
+            return default
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{name} must be a number")
+        if v < lo or (hi is not None and v > hi):
+            bounds = f"[{lo}, {hi}]" if hi is not None else f">= {lo}"
+            raise ValueError(f"{name} must be in {bounds} (got {v})")
+        return v
+
     def recall(self, query: str, scope: str = "all", session_id: str = "",
                limit: int = 10, owner: str = "",
                include_expired: bool = False,
@@ -59,11 +74,21 @@ class Router:
                hops: int = 1, rel: str = "",
                diagnostics: bool = False,
                source: str = "",
-               include_archived: bool = False) -> list[Hit]:
+               include_archived: bool = False,
+               importance_weight: float | None = None,
+               mmr_lambda: float | None = None,
+               scope_bias: float | None = None) -> list[Hit]:
         if scope not in VALID_SCOPES:
             raise ValueError(f"unknown scope {scope!r}: {VALID_SCOPES}")
         if limit <= 0:
             return []
+        # P2.8: per-call overrides поверх конфига; None = конфиг.
+        iw = self._override("importance_weight", importance_weight,
+                            self.cfg.importance_weight, 0.0, 1.0)
+        lam = self._override("mmr_lambda", mmr_lambda,
+                             self.cfg.mmr_lambda, 0.0, 1.0)
+        bias = self._override("scope_bias", scope_bias,
+                              self.cfg.scope_bias, 0.0, None)
         if scope == "session" and not session_id:
             return []  # #5: без session_id граф/поиск вернули бы чужие данные
         if source and scope == "facts":
@@ -76,7 +101,7 @@ class Router:
         self.last_stats = {
             "dim_skipped": 0,
             "importance": {
-                "weight": self.cfg.importance_weight,
+                "weight": iw,
                 "evaluated": 0,
                 "applied": 0,
                 "delta": {},
@@ -194,7 +219,7 @@ class Router:
         fused_refs = [(h.owner_table, h.owner_id) for h in fused]
         stamps = self.store.created_for(fused_refs)
         importance_values = (self.store.importance_for(fused_refs)
-                             if self.cfg.importance_weight > 0 else {})
+                             if iw > 0 else {})
         now = time.time()
         adjusted = []
         for h in fused:
@@ -204,14 +229,14 @@ class Router:
                 age_days = max(0.0, (now - ts) / 86400.0)
                 score *= 0.5 + 0.5 * math.exp(-age_days / self.cfg.recency_halflife_days)
             if scope == "all" and session_id and h.session_id == session_id:
-                score *= 1.0 + self.cfg.scope_bias
-            if self.cfg.importance_weight > 0:
+                score *= 1.0 + bias
+            if iw > 0:
                 ref = (h.owner_table, h.owner_id)
                 importance = importance_values.get(ref, 0.5)
                 # Bounded centered multiplier: importance adjusts relevance,
                 # but cannot replace a materially stronger semantic match.
                 before_importance = score
-                score *= 1.0 + self.cfg.importance_weight * (importance - 0.5)
+                score *= 1.0 + iw * (importance - 0.5)
                 delta = score - before_importance
                 self.last_stats["importance"]["evaluated"] += 1
                 if abs(delta) > 1e-12:
@@ -223,7 +248,7 @@ class Router:
                                 archived=h.archived))
         adjusted.sort(key=lambda h: -h.score)
         self.last_stats["reranked"] = len(adjusted)
-        final = self._mmr(adjusted, limit)
+        final = self._mmr(adjusted, limit, lam)
         if owner:
             # P2.7: банки на границе чтения. Лимит считается до фильтра
             # (under-fill возможен); утечки тел нет ни из одного плеча.
@@ -251,6 +276,8 @@ class Router:
                 "arms": {k: len(v) for k, v in arms.items()},       # до RRF
                 "contrib": {k: len({(h.owner_table, h.owner_id) for h in v} & keys)
                             for k, v in arms.items()},              # вклад в финал
+                "effective": {"importance_weight": iw, "mmr_lambda": lam,
+                              "scope_bias": bias},
                 "fused": len(adjusted), "returned": len(final),
                 "timings_ms": dict(timing,
                                    fuse_ms=round((time.perf_counter() - t0) * 1000, 3)),
@@ -284,20 +311,21 @@ class Router:
                     row["created_at"], archived=True)
                 for row in rows]
 
-    def _mmr(self, hits: list[Hit], limit: int) -> list[Hit]:
+    def _mmr(self, hits: list[Hit], limit: int, lam: float | None = None) -> list[Hit]:
         """MMR по Жаккару токенов тел: дубли parent/children не забивают топ.
 
         λ=1 — чистый relevance-порядок без перебора пар. Оценки нормируем
         на max (arm'ы живут в разных шкалах: FTS=1.0, cosine∈[-1,1], RRF≈0.01).
         """
-        if self.cfg.mmr_lambda >= 1.0 or len(hits) <= 1:
+        if lam is None:
+            lam = self.cfg.mmr_lambda
+        if lam >= 1.0 or len(hits) <= 1:
             return hits[:limit]
         cands = hits[:limit * 2]
         peak = max((h.score for h in cands), default=0.0) or 1.0
         sets = [set(tokenize(h.body)) for h in cands]
         picked = [0]
         chosen = {0}
-        lam = self.cfg.mmr_lambda
         while len(picked) < min(limit, len(cands)):
             best, best_val = -1, float("-inf")
             for i in range(1, len(cands)):

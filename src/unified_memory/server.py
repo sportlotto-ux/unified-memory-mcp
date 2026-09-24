@@ -220,7 +220,10 @@ def mem_recall(query: str, scope: str = "all", session_id: str = "",
                include_expired: bool = False, as_of: str = "",
                hops: int = 1, rel: str = "",
                diagnostics: bool = False, source: str = "",
-               include_archived: bool = False) -> str:
+               include_archived: bool = False,
+               importance_weight: float | None = None,
+               mmr_lambda: float | None = None,
+               scope_bias: float | None = None) -> str:
     """Unified search: FTS + vectors + RRF. Scope: all | session | facts.
     Истёкшие (valid_until) прячутся (include_expired=True — аудит истории).
     as_of (ISO-date) — срез графа на дату: valid_from <= as_of < valid_until.
@@ -232,6 +235,8 @@ def mem_recall(query: str, scope: str = "all", session_id: str = "",
     default false сохраняет hot-only recall.
     bounded importance component для facts включается конфигом UM_IMPORTANCE_WEIGHT;
     default 0 сохраняет legacy ranking, diagnostics показывает factor contribution.
+    Per-call (P2.8): importance_weight/mmr_lambda/scope_bias поверх конфига
+    (None = конфиг); effective значения — в diagnostics.effective.
     diagnostics=true → {"hits": [...], "diagnostics": {arms/contrib/timings/bfs/importance/degraded}};
     false — ровно прежний список (аддитивность)."""
     ing = _ingest()
@@ -246,7 +251,9 @@ def mem_recall(query: str, scope: str = "all", session_id: str = "",
     hits = router.recall(query, scope, session_id, limit, owner,
                          include_expired, as_of_ts, hops, rel,
                          diagnostics=diagnostics, source=source,
-                         include_archived=include_archived)
+                         include_archived=include_archived,
+                         importance_weight=importance_weight,
+                         mmr_lambda=mmr_lambda, scope_bias=scope_bias)
     out = []
     for h in hits:
         if h.snippet and len(h.body) > 2000:  # A4: сниппет только для ДЛИННЫХ FTS-тел

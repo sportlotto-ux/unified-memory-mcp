@@ -30,6 +30,8 @@
 - P2.7: bank sharing over facts (`bank` scope + `um_grants` read-only grants,
   `mem_bank_share/unshare`); visibility enforced on recall/get/expand/evidence
   boundaries; legacy semantics preserved.
+- P2.8: per-call rerank overrides (`importance_weight/mmr_lambda/scope_bias`
+  on `mem_recall`, `None` = config); defaults and legacy ranking unchanged.
 - Migration metadata columns for source references, confidence, veracity, and
   tool metadata; export/import and `mem_get` preserve them.
 

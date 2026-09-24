@@ -87,7 +87,7 @@ export UM_SUMMARIZER_MODEL=qwen3:4b   # дешёвая локальная мод
 | `mem_graph_query` | Bounded graph traversal: exact `subject`/`predicate`/`object` для entity edges, `rel`/`min_weight` для typed links, `as_of`, `max_hops`, owner/session/liveness isolation; deterministic `edges`/`links` result |
 | `mem_batch` | Атомарный батч записей (all-or-nothing): ops `remember_fact` \| `update` (fact/edge/link) \| `forget` (fact/edge/link). `dry_run=true` — валидация с откатом. Без кросс-ссылок; каждый op в savepoint; текст идёт через redaction-гейт |
 | `mem_update` | Правка факта по id (новая версия, history живёт) или истечение/reopen факта/ребра/связи (`valid_until`) |
-| `mem_recall` | Единый поиск: FTS + вектора + граф + RRF. `scope`: `all`/`session`/`facts`; `as_of` — срез графа на дату; `include_expired` — история; `source` — фильтр сообщений по source (facts/summaries/graph исключаются); `include_archived=true` — добавить bounded lexical search по cold archive (owner/session/source сохраняются, default hot-only); bounded importance component включается через `UM_IMPORTANCE_WEIGHT` (default `0`, legacy ranking); `hops>1` — BFS-обход типизированных связей и entity-графа, `rel` фильтрует связи (`supports`/`contradicts`/`supersedes`/`derives_from`; на рёбрах — `predicate`). `diagnostics=true` → `{hits, diagnostics}` (per-arm counts/вклад/timings/BFS/importance), `false` — прежний список |
+| `mem_recall` | Единый поиск: FTS + вектора + граф + RRF. `scope`: `all`/`session`/`facts`; `as_of` — срез графа на дату; `include_expired` — история; `source` — фильтр сообщений по source (facts/summaries/graph исключаются); `include_archived=true` — добавить bounded lexical search по cold archive (owner/session/source сохраняются, default hot-only); bounded importance component включается через `UM_IMPORTANCE_WEIGHT` (default `0`, legacy ranking); `hops>1` — BFS-обход типизированных связей и entity-графа, `rel` фильтрует связи (`supports`/`contradicts`/`supersedes`/`derives_from`; на рёбрах — `predicate`). `diagnostics=true` → `{hits, diagnostics}` (per-arm counts/вклад/timings/BFS/importance/effective), `false` — прежний список. Per-call P2.8: `importance_weight`/`mmr_lambda`/`scope_bias` поверх конфига (`None` = конфиг) |
 | `mem_recent` | Temporal: что было в UTC-окне (`today`/`yesterday`/`week`/`month`/`Nd`/`date:`/`last Nh`); пагинация старых страниц через `before_ts`+`before_id`+`before_kind` из `next` (kind — тайбрейкер тия между messages/summaries) |
 | `mem_expand` | Дословно по `kind`+`id`, единая схема `{kind,id,body}` |
 | `mem_get` | Точечное чтение `message/fact/summary/edge`: body, metadata, vector status и прямые links |
@@ -207,7 +207,7 @@ Derived/unsupported tables остаются в `skipped_fields`; source content 
 ## Разработка
 
 ```bash
-python -m pytest tests/ -q   # текущий dev-прогон: 414 passed, 4 skipped (Python 3.14)
+python -m pytest tests/ -q   # текущий dev-прогон: 420 passed, 4 skipped (Python 3.14)
 ```
 
 Полный suite также прогоняется на Python 3.12; CI дополнительно собирает wheel,
