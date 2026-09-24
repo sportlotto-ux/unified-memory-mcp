@@ -317,3 +317,52 @@ def test_validity_column_migration_is_atomic(tmp_path):
         ).fetchall() == [(0.0,)]
     finally:
         conn.close()
+
+
+def test_early_column_migration_is_atomic(tmp_path):
+    path = tmp_path / "early-migration.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE um_edges(id INTEGER PRIMARY KEY, predicate TEXT NOT NULL);
+        INSERT INTO um_edges VALUES(1, 'edge');
+        CREATE TABLE um_summaries(id INTEGER PRIMARY KEY, body TEXT NOT NULL);
+        INSERT INTO um_summaries VALUES(1, 'summary');
+        CREATE TABLE um_entities(id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+        INSERT INTO um_entities VALUES(1, 'Иван');
+        """
+    )
+    conn.commit()
+
+    def deny_update(action, arg1, arg2, db, source):
+        if action == sqlite3.SQLITE_UPDATE and arg1 == "um_entities":
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    conn.set_authorizer(deny_update)
+    store = object.__new__(Store)
+    store.conn = conn
+    try:
+        with pytest.raises(sqlite3.DatabaseError):
+            store._migrate_early_columns()
+        edge_cols = {row[1] for row in conn.execute(
+            "PRAGMA table_info(um_edges)")}
+        summary_cols = {row[1] for row in conn.execute(
+            "PRAGMA table_info(um_summaries)")}
+        entity_cols = {row[1] for row in conn.execute(
+            "PRAGMA table_info(um_entities)")}
+        assert "fact_id" not in edge_cols
+        assert "superseded_by" not in summary_cols
+        assert "display" not in entity_cols
+
+        conn.set_authorizer(None)
+        store._migrate_early_columns()
+        assert conn.execute("SELECT fact_id FROM um_edges").fetchall() == [(0,)]
+        assert conn.execute(
+            "SELECT superseded_by FROM um_summaries"
+        ).fetchall() == [(0,)]
+        assert conn.execute(
+            "SELECT name, display FROM um_entities"
+        ).fetchall() == [("Иван", "Иван")]
+    finally:
+        conn.close()

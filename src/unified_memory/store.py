@@ -284,21 +284,8 @@ class Store:
         self._recover_entity_migration()
         self._recover_link_migration()
         self.conn.executescript(SCHEMA)
-        # Миграция существующих БД: fact_id добавлен позже (#4).
-        cols = [r[1] for r in self.conn.execute("PRAGMA table_info(um_edges)")]
-        if "fact_id" not in cols:
-            self.conn.execute("ALTER TABLE um_edges ADD COLUMN fact_id INTEGER NOT NULL DEFAULT 0")
-            self.conn.commit()
-        scols = [r[1] for r in self.conn.execute("PRAGMA table_info(um_summaries)")]
-        if "superseded_by" not in scols:
-            self.conn.execute(
-                "ALTER TABLE um_summaries ADD COLUMN superseded_by INTEGER NOT NULL DEFAULT 0")
-            self.conn.commit()
-        ecols = [r[1] for r in self.conn.execute("PRAGMA table_info(um_entities)")]
-        if "display" not in ecols:
-            self.conn.execute("ALTER TABLE um_entities ADD COLUMN display TEXT NOT NULL DEFAULT ''")
-            self.conn.execute("UPDATE um_entities SET display=name WHERE display=''")
-            self.conn.commit()
+        # Миграция существующих БД: ранние additive-колонки и display backfill.
+        self._migrate_early_columns()
         # v0.4-п.2: owner-колонки. '' = legacy без изоляции, поведение не меняется.
         self._migrate_owner_columns()
         self._migrate_entity_owner()
@@ -335,6 +322,45 @@ class Store:
         self.conn.execute(
             "INSERT OR IGNORE INTO um_meta(key, value) VALUES('schema_version','1')")
         self.conn.commit()
+
+    def _migrate_early_columns(self) -> None:
+        """Apply early legacy columns and display backfill atomically."""
+        pending: list[tuple[str, str, str]] = []
+        edge_cols = {
+            row[1] for row in self.conn.execute("PRAGMA table_info(um_edges)")
+        }
+        if "fact_id" not in edge_cols:
+            pending.append(
+                ("um_edges", "fact_id", "INTEGER NOT NULL DEFAULT 0"))
+        summary_cols = {
+            row[1] for row in self.conn.execute(
+                "PRAGMA table_info(um_summaries)")
+        }
+        if "superseded_by" not in summary_cols:
+            pending.append(
+                ("um_summaries", "superseded_by", "INTEGER NOT NULL DEFAULT 0"))
+        entity_cols = {
+            row[1] for row in self.conn.execute(
+                "PRAGMA table_info(um_entities)")
+        }
+        display_missing = "display" not in entity_cols
+        if display_missing:
+            pending.append(
+                ("um_entities", "display", "TEXT NOT NULL DEFAULT ''"))
+        if not pending:
+            return
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            for table, col, ddl in pending:
+                self.conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+            if display_missing:
+                self.conn.execute(
+                    "UPDATE um_entities SET display=name WHERE display=''")
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
 
     def _recover_entity_migration(self) -> None:
         """Recover the staging table left by the legacy owner migration."""
