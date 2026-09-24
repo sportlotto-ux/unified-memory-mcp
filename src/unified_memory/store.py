@@ -267,6 +267,7 @@ class Store:
         self.conn = sqlite3.connect(str(cfg.db_path), check_same_thread=False)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA busy_timeout=10000")
+        self._recover_entity_migration()
         self.conn.executescript(SCHEMA)
         # Миграция существующих БД: fact_id добавлен позже (#4).
         cols = [r[1] for r in self.conn.execute("PRAGMA table_info(um_edges)")]
@@ -291,20 +292,7 @@ class Store:
                 self.conn.execute(
                     f"ALTER TABLE {t} ADD COLUMN owner TEXT NOT NULL DEFAULT ''")
                 self.conn.commit()
-        ecols = [r[1] for r in self.conn.execute("PRAGMA table_info(um_entities)")]
-        if "owner" not in ecols:
-            # UNIQUE(name) -> UNIQUE(name, owner): только через пересборку.
-            self.conn.executescript("""
-                CREATE TABLE um_entities_new(
-                    id INTEGER PRIMARY KEY, name TEXT NOT NULL,
-                    display TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL,
-                    owner TEXT NOT NULL DEFAULT '', UNIQUE(name, owner));
-                INSERT INTO um_entities_new(id, name, display, created_at, owner)
-                    SELECT id, name, display, created_at, '' FROM um_entities;
-                DROP TABLE um_entities;
-                ALTER TABLE um_entities_new RENAME TO um_entities;
-            """)
-            self.conn.commit()
+        self._migrate_entity_owner()
         # v0.5: valid_until (sentinel 0 = живое) + superseded_by на фактах.
         fcols = [r[1] for r in self.conn.execute("PRAGMA table_info(um_facts)")]
         for col, ddl in (("valid_until", "REAL NOT NULL DEFAULT 0"),
@@ -355,6 +343,66 @@ class Store:
         self.conn.execute(
             "INSERT OR IGNORE INTO um_meta(key, value) VALUES('schema_version','1')")
         self.conn.commit()
+
+    def _recover_entity_migration(self) -> None:
+        """Recover the staging table left by the legacy owner migration."""
+        names = {r[0] for r in self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        if "um_entities_new" not in names:
+            return
+        new_cols = {r[1] for r in self.conn.execute(
+            "PRAGMA table_info(um_entities_new)")}
+        if "owner" not in new_cols:
+            raise ValueError("invalid um_entities_new staging table")
+        if "um_entities" not in names:
+            self.conn.execute("ALTER TABLE um_entities_new RENAME TO um_entities")
+            self.conn.commit()
+            return
+        old_cols = {r[1] for r in self.conn.execute(
+            "PRAGMA table_info(um_entities)")}
+        old_count = self.conn.execute(
+            "SELECT count(*) FROM um_entities").fetchone()[0]
+        new_count = self.conn.execute(
+            "SELECT count(*) FROM um_entities_new").fetchone()[0]
+        if "owner" in old_cols and old_count == 0 and new_count:
+            self.conn.execute("BEGIN")
+            try:
+                self.conn.execute("DROP TABLE um_entities")
+                self.conn.execute(
+                    "ALTER TABLE um_entities_new RENAME TO um_entities")
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
+            return
+        # The old table is authoritative, or the staging copy is stale.
+        self.conn.execute("DROP TABLE um_entities_new")
+        self.conn.commit()
+
+    def _migrate_entity_owner(self) -> None:
+        """Rebuild legacy um_entities atomically for owner-aware uniqueness."""
+        cols = {r[1] for r in self.conn.execute(
+            "PRAGMA table_info(um_entities)")}
+        if "owner" in cols:
+            return
+        self.conn.execute("BEGIN")
+        try:
+            self.conn.execute("""
+                CREATE TABLE um_entities_new(
+                    id INTEGER PRIMARY KEY, name TEXT NOT NULL,
+                    display TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL,
+                    owner TEXT NOT NULL DEFAULT '', UNIQUE(name, owner));
+            """)
+            self.conn.execute(
+                "INSERT INTO um_entities_new(id, name, display, created_at, owner) "
+                "SELECT id, name, display, created_at, '' FROM um_entities")
+            self.conn.execute("DROP TABLE um_entities")
+            self.conn.execute(
+                "ALTER TABLE um_entities_new RENAME TO um_entities")
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
 
     # -- meta -------------------------------------------------------------
     @_locked
