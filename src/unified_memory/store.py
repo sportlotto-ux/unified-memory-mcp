@@ -303,17 +303,7 @@ class Store:
         self._migrate_owner_columns()
         self._migrate_entity_owner()
         # v0.5: valid_until (sentinel 0 = живое) + superseded_by на фактах.
-        fcols = [r[1] for r in self.conn.execute("PRAGMA table_info(um_facts)")]
-        for col, ddl in (("valid_until", "REAL NOT NULL DEFAULT 0"),
-                         ("superseded_by", "INTEGER NOT NULL DEFAULT 0")):
-            if col not in fcols:
-                self.conn.execute(f"ALTER TABLE um_facts ADD COLUMN {col} {ddl}")
-                self.conn.commit()
-        ecols2 = [r[1] for r in self.conn.execute("PRAGMA table_info(um_edges)")]
-        if "valid_until" not in ecols2:
-            self.conn.execute(
-                "ALTER TABLE um_edges ADD COLUMN valid_until REAL NOT NULL DEFAULT 0")
-            self.conn.commit()
+        self._migrate_validity_columns()
         # v0.7: um_links получил CHECK на концы/вес ПОСЛЕ первых прогонов.
         self._migrate_links_constraints()
         # P4.5: индекс создаётся строго ПОСЛЕ dedupe в том же проходе, значит его
@@ -425,6 +415,33 @@ class Store:
                 self.conn.execute(
                     f"ALTER TABLE {table} ADD COLUMN owner "
                     "TEXT NOT NULL DEFAULT ''")
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def _migrate_validity_columns(self) -> None:
+        """Add legacy validity columns as one resumable schema transaction."""
+        pending: list[tuple[str, str, str]] = []
+        fact_cols = {
+            row[1] for row in self.conn.execute("PRAGMA table_info(um_facts)")
+        }
+        for col, ddl in (("valid_until", "REAL NOT NULL DEFAULT 0"),
+                         ("superseded_by", "INTEGER NOT NULL DEFAULT 0")):
+            if col not in fact_cols:
+                pending.append(("um_facts", col, ddl))
+        edge_cols = {
+            row[1] for row in self.conn.execute("PRAGMA table_info(um_edges)")
+        }
+        if "valid_until" not in edge_cols:
+            pending.append(("um_edges", "valid_until", "REAL NOT NULL DEFAULT 0"))
+        if not pending:
+            return
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            for table, col, ddl in pending:
+                self.conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
             self.conn.commit()
         except Exception:
             self.conn.rollback()

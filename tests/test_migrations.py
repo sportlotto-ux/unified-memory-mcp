@@ -273,3 +273,47 @@ def test_owner_column_migration_is_atomic(tmp_path):
             assert "owner" in cols
     finally:
         conn.close()
+
+
+def test_validity_column_migration_is_atomic(tmp_path):
+    path = tmp_path / "validity-migration.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE um_facts(id INTEGER PRIMARY KEY, body TEXT NOT NULL);
+        INSERT INTO um_facts VALUES(1, 'fact');
+        CREATE TABLE um_edges(id INTEGER PRIMARY KEY, predicate TEXT NOT NULL);
+        INSERT INTO um_edges VALUES(1, 'edge');
+        """
+    )
+    conn.commit()
+
+    def deny_alter(action, arg1, arg2, db, source):
+        if action == sqlite3.SQLITE_ALTER_TABLE and arg2 == "um_edges":
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    conn.set_authorizer(deny_alter)
+    store = object.__new__(Store)
+    store.conn = conn
+    try:
+        with pytest.raises(sqlite3.DatabaseError):
+            store._migrate_validity_columns()
+        fact_cols = {row[1] for row in conn.execute(
+            "PRAGMA table_info(um_facts)")}
+        edge_cols = {row[1] for row in conn.execute(
+            "PRAGMA table_info(um_edges)")}
+        assert "valid_until" not in fact_cols
+        assert "superseded_by" not in fact_cols
+        assert "valid_until" not in edge_cols
+
+        conn.set_authorizer(None)
+        store._migrate_validity_columns()
+        assert conn.execute(
+            "SELECT valid_until, superseded_by FROM um_facts"
+        ).fetchall() == [(0.0, 0)]
+        assert conn.execute(
+            "SELECT valid_until FROM um_edges"
+        ).fetchall() == [(0.0,)]
+    finally:
+        conn.close()
