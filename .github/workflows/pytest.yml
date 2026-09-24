@@ -16,3 +16,22 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e . pytest
       - run: python -m pytest tests/ -q
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Build wheel
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip wheel . --no-deps --wheel-dir /tmp/um-wheel
+      - name: Install wheel in clean venv
+        run: |
+          python -m venv /tmp/um-wheel-venv
+          /tmp/um-wheel-venv/bin/python -m pip install /tmp/um-wheel/unified_memory_mcp-*.whl
+      - name: Import packaged server
+        run: |
+          /tmp/um-wheel-venv/bin/python -c "import unified_memory; from unified_memory.server import mcp; print(unified_memory.__version__); print(type(mcp).__name__)"
