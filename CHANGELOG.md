@@ -3,6 +3,21 @@
 Все значимые изменения. Формат близок к Keep a Changelog; версии — SemVer.
 Ранние версии (0.1–0.3) сжаты: это была внутренняя сборка до публикации.
 
+## [Unreleased]
+### Changed
+- Read-путь с флагом чистоты: `mem_recall`/`mem_assemble` (и
+  `Router.recall`/`ActiveWindow.assemble`) принимают `expire_working`
+  (default true — поведение 0.9.0). `expire_working=false` отключает ленивое
+  истечение working-фактов: чтение без записи (транзакций нет). Дефолт
+  сохраняет текущее поведение; `ro=True` означает «без записи, кроме
+  bounded lazy-GC по умолчанию; чистое чтение — через
+  `expire_working=false`».
+- Поведение 0.9.0 зафиксировано: триггер автокомпакции считается по
+  compactable (сырые минус свежий хвост, саммари не в счёт) + `min_batch`
+  откладывает мелкие батчи (`{status: ok, deferred: true}`); сырьё дольше
+  лежит, компакция срабатывает позже/реже, чем в 0.8.0. Намеренно (меньше
+  вызовов саммарайзера), не баг.
+
 ## [0.9.0] — 2026-09-24
 ### Added
 - P1.1–P1.5 parity additions: metadata inspection, lineage, archive recall,

@@ -223,7 +223,8 @@ def mem_recall(query: str, scope: str = "all", session_id: str = "",
                include_archived: bool = False,
                importance_weight: float | None = None,
                mmr_lambda: float | None = None,
-               scope_bias: float | None = None) -> str:
+               scope_bias: float | None = None,
+               expire_working: bool = True) -> str:
     """Unified search: FTS + vectors + RRF. Scope: all | session | facts.
     Истёкшие (valid_until) прячутся (include_expired=True — аудит истории).
     as_of (ISO-date) — срез графа на дату: valid_from <= as_of < valid_until.
@@ -238,7 +239,9 @@ def mem_recall(query: str, scope: str = "all", session_id: str = "",
     Per-call (P2.8): importance_weight/mmr_lambda/scope_bias поверх конфига
     (None = конфиг); effective значения — в diagnostics.effective.
     diagnostics=true → {"hits": [...], "diagnostics": {arms/contrib/timings/bfs/importance/degraded}};
-    false — ровно прежний список (аддитивность)."""
+    false — ровно прежний список (аддитивность).
+    expire_working=false отключает ленивое истечение working-фактов (чистое
+    чтение без записи); default true сохраняет поведение 0.9.0."""
     ing = _ingest()
     cfg = _STATE["cfg"]
     if hops < 1:
@@ -253,7 +256,8 @@ def mem_recall(query: str, scope: str = "all", session_id: str = "",
                          diagnostics=diagnostics, source=source,
                          include_archived=include_archived,
                          importance_weight=importance_weight,
-                         mmr_lambda=mmr_lambda, scope_bias=scope_bias)
+                         mmr_lambda=mmr_lambda, scope_bias=scope_bias,
+                         expire_working=expire_working)
     out = []
     for h in hits:
         if h.snippet and len(h.body) > 2000:  # A4: сниппет только для ДЛИННЫХ FTS-тел
@@ -458,10 +462,15 @@ def mem_compact(session_id: str, keep_tail: int = 20, owner: str = "") -> str:
 
 @mcp.tool(annotations=_ann(ro=True, idem=True))
 def mem_assemble(session_id: str, budget: int = 0, owner: str = "",
-                 include_working: bool = False) -> str:
-    """Bounded active context, optionally including a capped working slice."""
+                 include_working: bool = False,
+                 expire_working: bool = True) -> str:
+    """Bounded active context, optionally including a capped working slice.
+
+    expire_working=false отключает ленивое истечение working-фактов (чистое
+    чтение без записи); default true сохраняет поведение 0.9.0."""
     return json.dumps(_ingest().window.assemble(
-        session_id, budget, owner, include_working=include_working),
+        session_id, budget, owner, include_working=include_working,
+        expire_working=expire_working),
         ensure_ascii=False)
 
 

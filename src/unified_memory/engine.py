@@ -212,9 +212,11 @@ class ActiveWindow:
         return out
 
     def assemble(self, session_id: str, budget: int = 0,
-                 owner: str = "", include_working: bool = False) -> dict:
+                 owner: str = "", include_working: bool = False,
+                 expire_working: bool = True) -> dict:
         """Bounded active context plus an optional working-fact slice."""
-        self.store.expire_working_facts(owner=owner)
+        if expire_working:
+            self.store.expire_working_facts(owner=owner)
         budget = budget or self.cfg.assembly_budget
         half = budget // 2
         oc = " AND owner=?" if owner else ""

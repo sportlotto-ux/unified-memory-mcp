@@ -77,7 +77,8 @@ class Router:
                include_archived: bool = False,
                importance_weight: float | None = None,
                mmr_lambda: float | None = None,
-               scope_bias: float | None = None) -> list[Hit]:
+               scope_bias: float | None = None,
+               expire_working: bool = True) -> list[Hit]:
         if scope not in VALID_SCOPES:
             raise ValueError(f"unknown scope {scope!r}: {VALID_SCOPES}")
         if limit <= 0:
@@ -93,7 +94,8 @@ class Router:
             return []  # #5: без session_id граф/поиск вернули бы чужие данные
         if source and scope == "facts":
             return []
-        self.store.expire_working_facts(owner=owner)
+        if expire_working:
+            self.store.expire_working_facts(owner=owner)
         # P2.7: держатель грантов ищет шире (плечи без owner-фильтра),
         # выход — строгий пост-фильтр ниже. Без грантов поведение прежнее.
         broad = bool(owner) and self.store.has_grants(owner)
