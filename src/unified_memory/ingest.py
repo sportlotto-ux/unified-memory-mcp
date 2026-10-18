@@ -41,17 +41,22 @@ class Ingest:
 
     def remember_message(self, session_id: str, role: str, content: str,
                          source: str = "mcp", owner: str = "",
-                         _commit: bool = True) -> dict:
+                         _commit: bool = True, created_at: float | None = None,
+                         source_ref: str = "", source_order: int = 0) -> dict:
         if not (content or "").strip():
             raise ValueError("empty content: nothing to remember")
         content = self._clean(content)
         if _commit:
             with self.store.transaction():
                 mid = self._remember_message_write(
-                    session_id, role, content, source, owner)
+                    session_id, role, content, source, owner,
+                    created_at=created_at, source_ref=source_ref,
+                    source_order=source_order)
         else:
             mid = self._remember_message_write(
-                session_id, role, content, source, owner)
+                session_id, role, content, source, owner,
+                created_at=created_at, source_ref=source_ref,
+                source_order=source_order)
         # В batch (_commit=False) компакшн откладывается и делается один раз в конце
         # (guardrail 3): иначе N прогонов по частичному состоянию батча.
         compaction = (self.window.maybe_compact(session_id, owner)
@@ -59,9 +64,14 @@ class Ingest:
         return {"id": mid, "compaction": compaction}
 
     def _remember_message_write(self, session_id: str, role: str, content: str,
-                                source: str, owner: str) -> int:
+                                source: str, owner: str,
+                                created_at: float | None = None,
+                                source_ref: str = "",
+                                source_order: int = 0) -> int:
         mid = self.store.add_message(session_id, role, content, source, owner,
-                                     _commit=False)
+                                     _commit=False, created_at=created_at,
+                                     source_ref=source_ref,
+                                     source_order=source_order)
         if self.backend is not None:
             self.store.add_vector("um_messages", mid,
                                   self.backend.embed_docs([content])[0],

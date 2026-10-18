@@ -176,6 +176,7 @@ Derived/unsupported tables остаются в `skipped_fields`; source content 
 | `UM_IMPORTANCE_WEIGHT` | `0.0` | Bounded ranking component для facts; `0` сохраняет legacy ranking |
 | `UM_RECALL_ARM_LIMIT` | `10` | Ширина плеч recall (FTS/вектора/граф), независимая от `limit`; больше — шум получает второй голос в RRF и вытесняет точные попадания |
 | `UM_EDGE_WEIGHT` | `0.5` | Вес ребра в RRF-слиянии: `<1` не пускает связи-«наводки» вперёд фактов и сообщений (`1` = legacy). Связи ищутся `mem_graph_query` |
+| `UM_MESSAGE_WEIGHT` | `0.5` | Вес сообщения в RRF-слиянии: `<1` не пускает стенограммы вперёд фактов (`1` = legacy) |
 | `UM_WORKING_TTL_S` | `0` | TTL в секундах для `category=working`; `0` отключает TTL |
 | `UM_WORKING_LIMIT` | `20` | Максимум working facts в opt-in `mem_assemble` slice |
 | `UM_BATCH_MAX_OPS` | `100` | `mem_batch`: потолок числа ops (проверка до открытия транзакции) |

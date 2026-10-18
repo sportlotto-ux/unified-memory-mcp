@@ -870,12 +870,17 @@ class Store:
                     source: str = "unknown", owner: str = "",
                     _commit: bool = True, conversation_id: str = "",
                     source_order: int = 0, source_ref: str = "",
-                    metadata_json: str = "") -> int:
+                    metadata_json: str = "",
+                    created_at: float | None = None) -> int:
+        """Запись сообщения. `created_at` — исходный штамп для внешних импортов
+        (без него ставится текущее время), `source_ref` — id во внешней системе
+        (ключ идемпотентности для повторного захвата)."""
         cur = self.conn.execute(
             "INSERT INTO um_messages(session_id, owner, role, content, created_at, source,"
             " externalized_ref, conversation_id, source_order, source_ref, metadata_json)"
             " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            (session_id, owner, role, content, time.time(), source, None,
+            (session_id, owner, role, content,
+             float(created_at) if created_at else time.time(), source, None,
              conversation_id, int(source_order), source_ref, metadata_json),
         )
         mid = cur.lastrowid

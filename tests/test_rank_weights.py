@@ -1,4 +1,4 @@
-"""Приёмка веса рёбер в RRF: связи не должны вытеснять содержимое из топ-1.
+"""Приёмка весов видов записей в RRF: «контекст» не должен вытеснять содержимое.
 
 Ребро получает от графового плеча голос верхнего ранга, а его короткое тело
 (`субъект --предикат--> объект`) легко совпадает с запросом, поэтому при весе
@@ -65,6 +65,41 @@ def test_recall_keeps_fact_above_relation(make_cfg):
     assert hits, "recall ничего не вернул"
     assert hits[0].owner_table == "um_facts", [h.owner_table for h in hits]
     store.close()
+
+
+def test_message_weight_damps_transcripts():
+    fact = _h("um_facts", 1, "сертификат BUS202 сдан 24.09.2026")
+    note = _h("um_messages", 2, "разбирали сертификат BUS202 и порт 8127")
+    # стенограмма приходит двумя плечами, факт — одним: тот же перевес, что у рёбер
+    lists = [[fact], [note], [note]]
+    legacy = rrf_fuse(lists, message_weight=1.0)
+    damped = rrf_fuse(lists, message_weight=0.5)
+    assert legacy[0].owner_table == "um_messages"
+    assert damped[0].owner_table == "um_facts"
+    assert any(h.owner_table == "um_messages" for h in damped)
+
+
+def test_recall_prefers_fact_over_transcript(make_cfg):
+    cfg, store = make_cfg()
+    ing = Ingest(store, FakeBackend(), cfg=cfg)
+    ing.remember_message("ses_1", "user", "какой порт слушают эмбеддинги",
+                         source="opencode")
+    ing.remember_message("ses_1", "assistant", "эмбеддинги слушают порт 8127",
+                         source="opencode")
+    ing.remember_fact("infra", "порт", "эмбеддинги слушают порт 8127")
+    hits = Router(store, FakeBackend(), cfg).recall(
+        "порт 8127 эмбеддинги", scope="all", limit=5, expire_working=False)
+    assert hits and hits[0].owner_table == "um_facts", \
+        [h.owner_table for h in hits]
+    store.close()
+
+
+def test_message_weight_default_and_validation(tmp_path):
+    assert Config(db_path=tmp_path / "mw.db",
+                  archive_path=tmp_path / "mw.arc.db").message_weight == 0.5
+    with pytest.raises(ValueError):
+        Config(db_path=tmp_path / "mw2.db", archive_path=tmp_path / "mw2.arc.db",
+               message_weight=-1)
 
 
 def test_edge_weight_default_and_validation(tmp_path):

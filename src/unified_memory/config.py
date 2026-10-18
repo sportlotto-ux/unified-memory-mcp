@@ -124,6 +124,14 @@ def _default_edge_weight() -> float:
     return _strict_float("UM_EDGE_WEIGHT", 0.5)
 
 
+def _default_message_weight() -> float:
+    # Стенограмма — контекст, а не знание: при весе 1.0 захваченная история
+    # топила дефолтный поиск (замер 18.10.2026: после захвата 1287 сообщений
+    # scope=all hit@1 63% → 58%, hit@3 95% → 84%; при весе 0.5 — 68% / 95%).
+    # Сообщения остаются находимыми, просто ниже фактов.
+    return _strict_float("UM_MESSAGE_WEIGHT", 0.5)
+
+
 def _default_working_ttl_s() -> int:
     return _strict_int("UM_WORKING_TTL_S", 0)
 
@@ -270,6 +278,8 @@ class Config:
     # Вес ребра в RRF-слиянии: <1 не пускает «наводки»-связи вперёд
     # содержимого (фактов/сообщений).
     edge_weight: float = field(default_factory=_default_edge_weight)
+    # Вес сообщения в RRF-слиянии: <1 не пускает стенограммы вперёд фактов.
+    message_weight: float = field(default_factory=_default_message_weight)
     # P2.1: optional TTL for working slot-facts and bounded assembly cap.
     working_ttl_s: int = field(default_factory=_default_working_ttl_s)
     working_limit: int = field(default_factory=_default_working_limit)
@@ -299,6 +309,8 @@ class Config:
             raise ValueError("UM_RECALL_ARM_LIMIT must be >= 1")
         if self.edge_weight < 0:
             raise ValueError("UM_EDGE_WEIGHT must be >= 0")
+        if self.message_weight < 0:
+            raise ValueError("UM_MESSAGE_WEIGHT must be >= 0")
         if self.working_limit <= 0:
             raise ValueError("UM_WORKING_LIMIT must be > 0")
         if self.retention_days < 0:
