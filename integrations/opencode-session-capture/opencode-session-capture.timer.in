@@ -1,0 +1,12 @@
+[Unit]
+Description=Периодический захват сессий OpenCode в unified-memory
+Documentation=file://@REPO@/integrations/opencode-session-capture/README.md
+
+[Timer]
+OnBootSec=10min
+OnCalendar=*:0/10
+Persistent=true
+RandomizedDelaySec=2min
+
+[Install]
+WantedBy=timers.target

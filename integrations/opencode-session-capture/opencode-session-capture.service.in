@@ -1,0 +1,18 @@
+[Unit]
+Description=Захват сессий OpenCode в unified-memory (этап 1)
+Documentation=file://@REPO@/integrations/opencode-session-capture/README.md
+After=opencode-embeddings.service
+Wants=opencode-embeddings.service
+
+[Service]
+Type=oneshot
+# Тот же env, что у MCP и у обслуживания памяти: один источник правды по базе
+# и модели эмбеддингов (systemd не умеет читать opencode.json).
+EnvironmentFile=@MEMDIR@/memory.env
+Environment=UM_SRC=@REPO@/src
+ExecStart=/usr/bin/python3 @REPO@/integrations/opencode-session-capture/capture.py
+Nice=10
+IOSchedulingClass=idle
+# Захват — фоновая задача: падение шага не должно требовать внимания, но
+# деградация (например, API недоступен) обязана быть видна в systemctl --failed.
+SuccessExitStatus=0 1

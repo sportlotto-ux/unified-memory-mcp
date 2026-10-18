@@ -5,6 +5,11 @@
 
 ## [Unreleased]
 ### Added
+- `integrations/opencode-session-capture/` — обвязка захвата сессий OpenCode
+  (oneshot+timer): берёт `user`-текст и `assistant`-части `type=text`, никогда —
+  инъекции инструкций (`synthetic`), reasoning и вызовы инструментов; пишет через
+  `Ingest.remember_message` с `source_ref` (идемпотентно даже при потере файла
+  состояния) и исходным `created_at`. Тесты обвязки входят в общий suite.
 - Внешний импорт сообщений: `Store.add_message` и `Ingest.remember_message`
   принимают `created_at` (исходный штамп вместо времени записи), `source_ref`
   (id во внешней системе — ключ идемпотентности) и `source_order`. Без них
