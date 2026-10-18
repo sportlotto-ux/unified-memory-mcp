@@ -27,6 +27,9 @@ class FakeBackend:
     def embed_query(self, text):
         return self._vec(text)
 
+    def warm(self):
+        return None
+
 
 class LexicalBackend:
     """Детерминированные лексические эмбеддинги для golden-eval (v0.8 E20).
@@ -79,4 +82,7 @@ class LexicalBackend:
 
     def embed_query(self, text):
         return self._vec(text)
+
+    def warm(self):
+        return None
 
