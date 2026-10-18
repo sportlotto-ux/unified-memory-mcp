@@ -217,11 +217,45 @@ _INDEXES = [
     "target_table, target_id, kind, value, owner)",
 ]
 
+_FTS_MAIN = "um_fts"
+_FTS_MSG = "um_fts_msg"
+
 _FTS_SCHEMA = """
 CREATE VIRTUAL TABLE IF NOT EXISTS um_fts USING fts5(
     owner_table, owner_id UNINDEXED, body, tokenize='trigram'
 );
+CREATE VIRTUAL TABLE IF NOT EXISTS um_fts_msg USING fts5(
+    owner_table, owner_id UNINDEXED, body, tokenize='trigram'
+);
 """
+
+
+def fts_table_for(owner_table: str) -> str:
+    """FTS-индекс для вида записи.
+
+    Сообщения лежат в отдельном индексе: bm25 считает IDF по корпусу своей
+    таблицы, поэтому стенограммы двигали ранжирование фактов — после захвата
+    1245 сообщений `scope=facts` hit@1 падал 68% → 63%, а вывод сообщений из
+    общего индекса возвращал метрики к исходным (замер 18.10.2026).
+    """
+    return _FTS_MSG if owner_table == "um_messages" else _FTS_MAIN
+
+
+def _interleave(parts: list[list]) -> list:
+    """Слить выдачи разных FTS-индексов по позициям ранга.
+
+    Оценки bm25 из разных индексов несравнимы (IDF считается по своему корпусу),
+    поэтому чередуем по позиции: ранг 0 первого индекса, ранг 0 второго, ранг 1
+    первого… Так преимущество не получает ни один индекс — ни из-за размера
+    корпуса, ни из-за шкалы скоринга.
+    """
+    out: list = []
+    span = max((len(part) for part in parts), default=0)
+    for i in range(span):
+        for part in parts:
+            if i < len(part):
+                out.append(part[i])
+    return out
 
 _WORD_RE = re.compile(r"[0-9a-zA-Zа-яА-ЯёЁ_]+", re.UNICODE)
 
@@ -428,6 +462,9 @@ class Store:
             self.fts = True
         except sqlite3.OperationalError:
             self.fts = False  # сборка без FTS5 — деградация до LIKE, флаг в mem_status
+        # v0.10: сообщения переезжают в свой FTS-индекс (см. fts_table_for).
+        # Только после создания индексов: до этого self.fts ещё не выставлен.
+        self._migrate_split_message_fts()
         if embedding_dim:
             check_store_dim(embedding_dim, embedding_model, self.meta_get)
             if self.meta_get("embedding_model") is None:
@@ -1259,7 +1296,8 @@ class Store:
     def _fts_index(self, owner_table: str, owner_id: int, body: str) -> None:
         if self.fts:
             self.conn.execute(
-                "INSERT INTO um_fts(owner_table, owner_id, body) VALUES(?,?,?)",
+                f"INSERT INTO {fts_table_for(owner_table)}(owner_table, owner_id, body)"
+                " VALUES(?,?,?)",
                 (owner_table, owner_id, body),
             )
 
@@ -1337,6 +1375,65 @@ class Store:
         return [dict(zip(keys, r)) for r in rows]
 
     @_locked
+    def _fts_rows(self, index: str, tables: list[str], match: str, *,
+                  scope: str, session_id: str, owner: str, source: str,
+                  include_expired: bool, as_of: float | None,
+                  limit: int) -> list[tuple]:
+        """Строки одного FTS-индекса: [(owner_table, owner_id, snippet)].
+
+        Фильтры скоупа джойнятся к родительским строкам ДО LIMIT: иначе чужие
+        сессии/владельцы съедают весь набор кандидатов.
+        """
+        alias_by_table = {
+            "um_messages": "m", "um_summaries": "s",
+            "um_facts": "fct", "um_edges": "e",
+        }
+        joins: list[str] = []
+        scoped: list[str] = []
+        scope_params: list = []
+        for table in tables:
+            alias = alias_by_table[table]
+            joins.append(
+                f" LEFT JOIN {table} AS {alias}"
+                f" ON f.owner_table='{table}' AND f.owner_id={alias}.id"
+            )
+            checks = [f"{alias}.id IS NOT NULL"]
+            if owner:
+                checks.append(f"{alias}.owner=?")
+                scope_params.append(owner)
+            if scope == "session" and table in (
+                    "um_messages", "um_summaries", "um_edges"):
+                checks.append(f"{alias}.session_id=?")
+                scope_params.append(session_id)
+            if source and table == "um_messages":
+                checks.append(f"{alias}.source=?")
+                scope_params.append(source)
+            if table in ("um_facts", "um_edges"):
+                if as_of is not None:
+                    checks.extend([
+                        f"{alias}.created_at<=?",
+                        f"({alias}.valid_until=0 OR {alias}.valid_until>?)",
+                    ])
+                    scope_params.extend([as_of, as_of])
+                elif not include_expired:
+                    checks.append(
+                        f"({alias}.valid_until=0 OR {alias}.valid_until>?)")
+                    scope_params.append(time.time())
+            scoped.append(
+                f"(f.owner_table='{table}' AND {' AND '.join(checks)})")
+        ph = ",".join("?" * len(tables))
+        q = (f"SELECT f.owner_table, f.owner_id,"
+             f" snippet({index}, 2, '[', ']', '…', 8) FROM {index} AS f"
+             + "".join(joins)
+             + f" WHERE {index} MATCH ? AND f.owner_table IN ({ph})"
+             + " AND (" + " OR ".join(scoped) + ")"
+             " ORDER BY rank LIMIT ?")
+        try:
+            return self.conn.execute(
+                q, (match, *tables, *scope_params, limit * 3)).fetchall()
+        except sqlite3.OperationalError:
+            return []
+
     def fts_search(self, query: str, scope: str = "all",
                    session_id: str = "", limit: int = 20,
                    owner: str = "",
@@ -1367,61 +1464,20 @@ class Store:
             tables = ["um_messages"]
         if self.fts and max(len(t) for t in terms) >= 3:
             match = " OR ".join(f'"{t}"' for t in terms[:10] if len(t) >= 3)
-            # The FTS table stores only (owner_table, owner_id, body), so scope
-            # filters must be joined back to the parent rows before LIMIT.
-            # Filtering after the global FTS limit lets unrelated sessions or
-            # owners consume the whole candidate set.
-            alias_by_table = {
-                "um_messages": "m", "um_summaries": "s",
-                "um_facts": "fct", "um_edges": "e",
-            }
-            joins = []
-            scoped = []
-            scope_params: list = []
-            for table in tables:
-                alias = alias_by_table[table]
-                joins.append(
-                    f" LEFT JOIN {table} AS {alias}"
-                    f" ON f.owner_table='{table}' AND f.owner_id={alias}.id"
-                )
-                checks = [f"{alias}.id IS NOT NULL"]
-                if owner:
-                    checks.append(f"{alias}.owner=?")
-                    scope_params.append(owner)
-                if scope == "session" and table in (
-                        "um_messages", "um_summaries", "um_edges"):
-                    checks.append(f"{alias}.session_id=?")
-                    scope_params.append(session_id)
-                if source and table == "um_messages":
-                    checks.append(f"{alias}.source=?")
-                    scope_params.append(source)
-                if table in ("um_facts", "um_edges"):
-                    if as_of is not None:
-                        checks.extend([
-                            f"{alias}.created_at<=?",
-                            f"({alias}.valid_until=0 OR {alias}.valid_until>?)",
-                        ])
-                        scope_params.extend([as_of, as_of])
-                    elif not include_expired:
-                        checks.append(
-                            f"({alias}.valid_until=0 OR {alias}.valid_until>?)"
-                        )
-                        scope_params.append(time.time())
-                scoped.append(
-                    f"(f.owner_table='{table}' AND {' AND '.join(checks)})"
-                )
-            ph = ",".join("?" * len(tables))
-            q = ("SELECT f.owner_table, f.owner_id,"
-                 " snippet(um_fts, 2, '[', ']', '…', 8) FROM um_fts AS f"
-                 + "".join(joins)
-                 + f" WHERE um_fts MATCH ? AND f.owner_table IN ({ph})"
-                 + " AND (" + " OR ".join(scoped) + ")"
-                 " ORDER BY rank LIMIT ?")
-            try:
-                rows = self.conn.execute(
-                    q, (match, *tables, *scope_params, limit * 3)).fetchall()
-            except sqlite3.OperationalError:
-                rows = []
+            # Два индекса: факты/связи/сводки — общий, сообщения — свой. Скоуп
+            # "facts" вообще не трогает индекс сообщений, поэтому стенограммы не
+            # двигают ранжирование фактов (см. fts_table_for).
+            parts = []
+            for index, group in (
+                    (_FTS_MAIN, [t for t in tables if t != "um_messages"]),
+                    (_FTS_MSG, [t for t in tables if t == "um_messages"])):
+                if group:
+                    parts.append(self._fts_rows(
+                        index, group, match, scope=scope,
+                        session_id=session_id, owner=owner, source=source,
+                        include_expired=include_expired, as_of=as_of,
+                        limit=limit))
+            rows = _interleave(parts)[:limit * 3]
             cand = [(ot, oid) for ot, oid, _ in rows if ot in tables]
             snips = {(ot, oid): sn for ot, oid, sn in rows if ot in tables}
             owners = self.owners_for(cand) if owner else {}
@@ -1921,7 +1977,8 @@ class Store:
             "DELETE FROM um_vectors WHERE owner_table='um_messages' AND owner_id=?", (mid,))
         if self.fts:
             self.conn.execute(
-                "DELETE FROM um_fts WHERE owner_table='um_messages' AND owner_id=?", (mid,))
+                f"DELETE FROM {fts_table_for('um_messages')}"
+                " WHERE owner_table='um_messages' AND owner_id=?", (mid,))
         # Archiving changes the raw-message set. Force a one-time pressure
         # rebuild instead of leaving stale per-session counters behind.
         self.conn.execute(
@@ -3033,7 +3090,7 @@ class Store:
             if self.fts:
                 try:
                     rows = self.conn.execute(
-                        "SELECT owner_id FROM um_fts WHERE owner_table=?"
+                        f"SELECT owner_id FROM {fts_table_for(ot)} WHERE owner_table=?"
                         f" AND owner_id NOT IN ({psql}) LIMIT 11", (ot,)).fetchall()
                 except Exception:
                     rows = []
@@ -3056,25 +3113,50 @@ class Store:
         out["duplicate_facts"] = self._duplicate_facts()
         return out
 
+    def _migrate_split_message_fts(self) -> None:
+        """Перенести сообщения из общего FTS-индекса в отдельный (однократно).
+
+        Идемпотентно: после переноса строк с owner_table='um_messages' в общем
+        индексе не остаётся, повторный вызов ничего не делает. Если индекса ещё
+        нет (FTS5 не собрался) — молча выходим: деградация до LIKE уже видна в
+        mem_status.
+        """
+        if not self.fts:
+            return
+        try:
+            rows = self.conn.execute(
+                "SELECT owner_table, owner_id, body FROM um_fts"
+                " WHERE owner_table='um_messages'").fetchall()
+        except sqlite3.OperationalError:
+            return
+        if not rows:
+            return
+        self.conn.executemany(
+            f"INSERT INTO {_FTS_MSG}(owner_table, owner_id, body) VALUES(?,?,?)",
+            rows)
+        self.conn.execute("DELETE FROM um_fts WHERE owner_table='um_messages'")
+        self.conn.commit()
+
     def rebuild_fts(self) -> bool:
-        """Полная пересборка um_fts из родителей (формат тел — как _fts_index).
+        """Полная пересборка обоих FTS-индексов из родителей (формат — как _fts_index).
 
         Без лока: вызывается из locked-контекста (repair) и из import-транзакции.
         """
         if not self.fts:
             return False
-        self.conn.execute("DELETE FROM um_fts")
+        self.conn.execute(f"DELETE FROM {_FTS_MAIN}")
+        self.conn.execute(f"DELETE FROM {_FTS_MSG}")
         self.conn.execute(
-            "INSERT INTO um_fts(owner_table, owner_id, body)"
+            f"INSERT INTO {_FTS_MSG}(owner_table, owner_id, body)"
             " SELECT 'um_messages', id, content FROM um_messages")
         self.conn.execute(
-            "INSERT INTO um_fts(owner_table, owner_id, body)"
+            f"INSERT INTO {_FTS_MAIN}(owner_table, owner_id, body)"
             " SELECT 'um_summaries', id, body FROM um_summaries")
         self.conn.execute(
-            "INSERT INTO um_fts(owner_table, owner_id, body)"
+            f"INSERT INTO {_FTS_MAIN}(owner_table, owner_id, body)"
             " SELECT 'um_facts', id, name || ' ' || body FROM um_facts")
         self.conn.execute(
-            """INSERT INTO um_fts(owner_table, owner_id, body)
+            f"""INSERT INTO {_FTS_MAIN}(owner_table, owner_id, body)
                SELECT 'um_edges', e.id, s.display || ' ' || e.predicate || ' ' || o.display
                FROM um_edges e JOIN um_entities s ON s.id=e.subject_id
                JOIN um_entities o ON o.id=e.object_id""")
@@ -3102,7 +3184,8 @@ class Store:
         if self.fts:
             for ot, oid in dirty["orphan_fts"]:
                 self.conn.execute(
-                    "DELETE FROM um_fts WHERE owner_table=? AND owner_id=?",
+                    f"DELETE FROM {fts_table_for(ot)}"
+                    " WHERE owner_table=? AND owner_id=?",
                     (ot, oid))
             report["purged_fts"] = len(dirty["orphan_fts"])
             # Полная пересборка FTS из родителей (формат тел — как _fts_index).

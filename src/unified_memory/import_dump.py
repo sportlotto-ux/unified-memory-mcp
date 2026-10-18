@@ -43,9 +43,10 @@ SUPPORTED = ("1",)
 IMPORT_TABLES = ("um_entities", "um_facts", "um_messages", "um_summaries",
                  "um_summary_sources", "um_edges", "um_links", "um_annotations",
                  "um_grants", "um_vectors")
-# um_meta читаем (schema_version), um_fts/um_vecidx — производные (legacy-дампы
-# их содержат), при импорте игнорируются: FTS пересобирается, vecidx — reindex.
-IGNORED = ("um_meta", "um_fts", "um_vecidx")
+# um_meta читаем (schema_version), um_fts/um_fts_msg/um_vecidx — производные
+# (legacy-дампы их содержат), при импорте игнорируются: FTS пересобирается,
+# vecidx — reindex.
+IGNORED = ("um_meta", "um_fts", "um_fts_msg", "um_vecidx")
 KNOWN = set(IMPORT_TABLES) | set(IGNORED)
 
 

@@ -66,6 +66,7 @@ def test_repair_rebuilds_fts(ing):
     if not ing.store.fts:
         pytest.skip("no FTS5 in this build")
     ing.store.conn.execute("DELETE FROM um_fts")
+    ing.store.conn.execute("DELETE FROM um_fts_msg")
     ing.store.conn.commit()
     assert ing.store.fts_search("восстановимая") == []
     ing.store.repair(dim=0)
