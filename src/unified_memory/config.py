@@ -107,6 +107,15 @@ def _default_importance_weight() -> float:
     return _strict_float("UM_IMPORTANCE_WEIGHT", 0.0)
 
 
+def _default_arm_limit() -> int:
+    # 10 = историческая ширина плеча для малых страниц (limit=5 → было limit*2).
+    # Больше — шумовые кандидаты получают второй голос в RRF и вытесняют точные
+    # попадания: golden-eval проекта краснеет уже при 20 (графовый хит выпадает
+    # из топ-3), на реальной памяти промах «обновление зависимостей» ведёт себя
+    # так же. Поэтому дефолт — узкое постоянное плечо, а не широкое.
+    return _strict_int("UM_RECALL_ARM_LIMIT", 10)
+
+
 def _default_working_ttl_s() -> int:
     return _strict_int("UM_WORKING_TTL_S", 0)
 
@@ -246,6 +255,10 @@ class Config:
     archive_recall_scan: int = field(default_factory=_default_archive_recall_scan)
     # P1.4: optional bounded importance multiplier; 0 preserves legacy ranking.
     importance_weight: float = field(default_factory=_default_importance_weight)
+    # Ширина плеч recall (FTS/вектора/граф), независимая от limit: иначе порядок
+    # выдачи плывёт от размера запрошенной страницы (замер 18.10.2026: топ-1
+    # совпадал при разных limit лишь у 9/19 запросов).
+    recall_arm_limit: int = field(default_factory=_default_arm_limit)
     # P2.1: optional TTL for working slot-facts and bounded assembly cap.
     working_ttl_s: int = field(default_factory=_default_working_ttl_s)
     working_limit: int = field(default_factory=_default_working_limit)
@@ -271,6 +284,8 @@ class Config:
             raise ValueError("UM_IMPORTANCE_WEIGHT must be in [0, 1] (0 = off)")
         if self.working_ttl_s < 0:
             raise ValueError("UM_WORKING_TTL_S must be >= 0 (0 = off)")
+        if self.recall_arm_limit < 1:
+            raise ValueError("UM_RECALL_ARM_LIMIT must be >= 1")
         if self.working_limit <= 0:
             raise ValueError("UM_WORKING_LIMIT must be > 0")
         if self.retention_days < 0:

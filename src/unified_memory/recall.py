@@ -100,6 +100,10 @@ class Router:
         # выход — строгий пост-фильтр ниже. Без грантов поведение прежнее.
         broad = bool(owner) and self.store.has_grants(owner)
         arm_owner = "" if broad else owner
+        # Ширина плеч НЕ зависит от limit: иначе порядок выдачи плывёт —
+        # например, с limit=5 в KNN попадали посторонние факты, получали бонус
+        # двух плеч и вытесняли точное попадание FTS из топ-1 (замер 18.10.2026).
+        arm = max(limit, self.cfg.recall_arm_limit)
         self.last_stats = {
             "dim_skipped": 0,
             "importance": {
@@ -114,7 +118,7 @@ class Router:
         timing: dict = {}
         t0 = time.perf_counter() if diagnostics else 0.0
         fts_hits = self.store.fts_search(query, scope=scope, session_id=session_id,
-                                         limit=limit * 2, owner=arm_owner,
+                                         limit=arm, owner=arm_owner,
                                          include_expired=include_expired, as_of=as_of,
                                          source=source)
         if fts_hits:
@@ -125,7 +129,7 @@ class Router:
         archive_hits: list[Hit] = []
         if include_archived:
             archive_hits = self._archive_hits(
-                query, scope, session_id, limit, arm_owner, source)
+                query, scope, session_id, arm, arm_owner, source)
             if archive_hits:
                 lists.append(archive_hits)
             if diagnostics:
@@ -143,7 +147,7 @@ class Router:
             cand = []
             self.last_stats["vec_index"] = "brute"
             if self.cfg.vec_index != "off":
-                knn_rows = self.store.knn(qv, tables, arm_owner, limit * 2)
+                knn_rows = self.store.knn(qv, tables, arm_owner, arm)
                 if knn_rows:
                     vecs = self.store.vectors_for(
                         [(ot, oid) for ot, oid, _ in knn_rows])
@@ -186,7 +190,7 @@ class Router:
                     continue
                 scored.append(Hit(ot, oid, body, cosine(qv, vec), sid))
             scored.sort(key=lambda h: -h.score)
-            vec_hits = scored[:limit * 2]
+            vec_hits = scored[:arm]
             if vec_hits:
                 lists.append(vec_hits)
         if diagnostics:
@@ -202,11 +206,11 @@ class Router:
             # guardrail 1: старый _graph_arm не тронут; BFS — отдельная ветка.
             seeds = [(h.owner_table, h.owner_id) for lst in lists for h in lst
                      if not h.archived]
-            graph_hits = self._graph_bfs(query, scope, session_id, limit * 2,
+            graph_hits = self._graph_bfs(query, scope, session_id, arm,
                                          arm_owner, include_expired, as_of, hops,
                                          rel, seeds)
         else:
-            graph_hits = self._graph_arm(query, scope, session_id, limit * 2, arm_owner,
+            graph_hits = self._graph_arm(query, scope, session_id, arm, arm_owner,
                                          include_expired, as_of)
         if graph_hits:
             lists.append(graph_hits)
@@ -250,7 +254,7 @@ class Router:
                                 archived=h.archived))
         adjusted.sort(key=lambda h: -h.score)
         self.last_stats["reranked"] = len(adjusted)
-        final = self._mmr(adjusted, limit, lam)
+        final = self._mmr(adjusted, limit, lam, pool=arm)
         if owner:
             # P2.7: банки на границе чтения. Лимит считается до фильтра
             # (under-fill возможен); утечки тел нет ни из одного плеча.
@@ -284,6 +288,7 @@ class Router:
                 "timings_ms": dict(timing,
                                    fuse_ms=round((time.perf_counter() - t0) * 1000, 3)),
                 "hops": hops,
+                "arm_limit": arm,
                 "bfs": self.last_stats.get("bfs"),
                 "importance": self.last_stats.get("importance", {}),
                 "degraded": {"vectors_enabled": self.backend is not None,
@@ -295,7 +300,10 @@ class Router:
 
     def _archive_hits(self, query: str, scope: str, session_id: str,
                       limit: int, owner: str, source: str) -> list[Hit]:
-        """Read an existing cold archive without creating or mutating it."""
+        """Read an existing cold archive without creating or mutating it.
+
+        `limit` — уже ширина плеча (arm), второй раз её не удваиваем.
+        """
         path = self.cfg.archive_path
         if not path.exists():
             return []
@@ -304,7 +312,7 @@ class Router:
         try:
             rows = archive.search_messages(
                 conn, query, scope=scope, session_id=session_id,
-                limit=limit * 2, owner=owner, source=source,
+                limit=limit, owner=owner, source=source,
                 max_scan=self.cfg.archive_recall_scan, label=str(path))
         finally:
             conn.close()
@@ -313,17 +321,19 @@ class Router:
                     row["created_at"], archived=True)
                 for row in rows]
 
-    def _mmr(self, hits: list[Hit], limit: int, lam: float | None = None) -> list[Hit]:
+    def _mmr(self, hits: list[Hit], limit: int, lam: float | None = None,
+             pool: int = 0) -> list[Hit]:
         """MMR по Жаккару токенов тел: дубли parent/children не забивают топ.
 
         λ=1 — чистый relevance-порядок без перебора пар. Оценки нормируем
         на max (arm'ы живут в разных шкалах: FTS=1.0, cosine∈[-1,1], RRF≈0.01).
+        `pool` — размер пула кандидатов; 0 = историческое limit*2.
         """
         if lam is None:
             lam = self.cfg.mmr_lambda
         if lam >= 1.0 or len(hits) <= 1:
             return hits[:limit]
-        cands = hits[:limit * 2]
+        cands = hits[:pool or limit * 2]
         peak = max((h.score for h in cands), default=0.0) or 1.0
         sets = [set(tokenize(h.body)) for h in cands]
         picked = [0]
