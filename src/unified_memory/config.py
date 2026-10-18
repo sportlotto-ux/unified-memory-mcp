@@ -132,6 +132,31 @@ def _default_message_weight() -> float:
     return _strict_float("UM_MESSAGE_WEIGHT", 0.5)
 
 
+def _default_rerank() -> str:
+    # Реранкер — опция, а не дефолт: ходит в сеть (документы уходят наружу) и
+    # добавляет ~0.8 с к вызову. Включается осознанно: UM_RERANK=jev.
+    raw = (os.environ.get("UM_RERANK") or "off").strip().lower()
+    if raw not in ("off", "jev"):
+        raise ValueError(f"UM_RERANK must be 'off' or 'jev', got {raw!r}")
+    return raw
+
+
+def _default_rerank_url() -> str:
+    from .rerank import DEFAULT_URL
+    return os.environ.get("UM_RERANK_URL") or DEFAULT_URL
+
+
+def _default_rerank_model() -> str:
+    from .rerank import DEFAULT_MODEL
+    return os.environ.get("UM_RERANK_MODEL") or DEFAULT_MODEL
+
+
+def _default_rerank_threshold() -> float:
+    # 0.5 — порог плагина Jev и замера: на вопросах без ответа в памяти
+    # топ-оценка была 0.03–0.33, там где ответ есть — 0.84–0.97.
+    return _strict_float("UM_RERANK_THRESHOLD", 0.5)
+
+
 def _default_working_ttl_s() -> int:
     return _strict_int("UM_WORKING_TTL_S", 0)
 
@@ -211,13 +236,13 @@ def _default_vec_index() -> str:
 
 
 def _default_redact_patterns() -> tuple[str, ...]:
-    from .redact import ALL, PATTERNS
+    from .redact import ALL, KNOWN
 
     raw = os.environ.get("UM_REDACT_PATTERNS")
     names = [p.strip().lower() for p in raw.split(",")] if raw else list(ALL)
-    unknown = [p for p in names if p not in PATTERNS]
+    unknown = [p for p in names if p not in KNOWN]
     if unknown:
-        raise ValueError(f"UM_REDACT_PATTERNS unknown: {unknown}, known: {list(ALL)}")
+        raise ValueError(f"UM_REDACT_PATTERNS unknown: {unknown}, known: {list(KNOWN)}")
     return tuple(names)
 
 
@@ -280,6 +305,20 @@ class Config:
     edge_weight: float = field(default_factory=_default_edge_weight)
     # Вес сообщения в RRF-слиянии: <1 не пускает стенограммы вперёд фактов.
     message_weight: float = field(default_factory=_default_message_weight)
+    # Реранкер recall (Jev): судит пары (вопрос, кандидат) поверх широкого пула.
+    # Замер 18.10.2026: hit@1 в scope=all 79% → 89%, а на вопросах без ответа в
+    # памяти он же даёт «не нашёл» (топ-оценка 0.03–0.33 против порога 0.5).
+    rerank: str = field(default_factory=_default_rerank)
+    rerank_url: str = field(default_factory=_default_rerank_url)
+    # Zen-канал ключа не требует ('public'); второй канал — ключ TypeSafe.
+    rerank_key: str = field(
+        default_factory=lambda: os.environ.get("UM_RERANK_KEY") or "public")
+    rerank_model: str = field(default_factory=_default_rerank_model)
+    rerank_threshold: float = field(default_factory=_default_rerank_threshold)
+    # Ширина пула для судейства и кап текста кандидата (после редакции).
+    rerank_pool: int = field(default_factory=lambda: _strict_int("UM_RERANK_POOL", 25))
+    rerank_timeout: float = field(default_factory=lambda: _strict_float("UM_RERANK_TIMEOUT", 20.0))
+    rerank_doc_chars: int = field(default_factory=lambda: _strict_int("UM_RERANK_DOC_CHARS", 900))
     # P2.1: optional TTL for working slot-facts and bounded assembly cap.
     working_ttl_s: int = field(default_factory=_default_working_ttl_s)
     working_limit: int = field(default_factory=_default_working_limit)
@@ -311,6 +350,18 @@ class Config:
             raise ValueError("UM_EDGE_WEIGHT must be >= 0")
         if self.message_weight < 0:
             raise ValueError("UM_MESSAGE_WEIGHT must be >= 0")
+        if self.rerank not in ("off", "jev"):
+            raise ValueError("UM_RERANK must be 'off' or 'jev'")
+        if not 0.0 <= self.rerank_threshold <= 1.0:
+            raise ValueError("UM_RERANK_THRESHOLD must be in [0, 1]")
+        if self.rerank_pool < 1:
+            raise ValueError("UM_RERANK_POOL must be >= 1")
+        if self.rerank_timeout <= 0:
+            raise ValueError("UM_RERANK_TIMEOUT must be > 0")
+        if self.rerank_doc_chars < 0:
+            raise ValueError("UM_RERANK_DOC_CHARS must be >= 0 (0 = без обрезки)")
+        if self.rerank != "off" and not self.rerank_url:
+            raise ValueError("UM_RERANK_URL must be non-empty when rerank is on")
         if self.working_limit <= 0:
             raise ValueError("UM_WORKING_LIMIT must be > 0")
         if self.retention_days < 0:

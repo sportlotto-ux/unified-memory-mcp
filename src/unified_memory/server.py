@@ -730,9 +730,9 @@ def _secret_scan(store, patterns, cap: int = 50) -> dict:
 
     Отчёт только `{pattern, kind, id}` — БЕЗ значений (иначе сканер сам утечка).
     """
-    from unified_memory.redact import PATTERNS
+    from unified_memory.redact import KNOWN
 
-    active = [p for p in patterns if p in PATTERNS]
+    active = [p for p in patterns if p in KNOWN]
     sources = [("um_messages", "content"), ("um_facts", "body"),
                ("um_summaries", "body"), ("um_entities", "name"),
                ("um_edges", "predicate"), ("um_annotations", "value")]
@@ -747,7 +747,7 @@ def _secret_scan(store, patterns, cap: int = 50) -> dict:
                 for name in active:
                     if name == "private_key" and "PRIVATE KEY" not in text.upper():
                         continue
-                    if PATTERNS[name].search(text):
+                    if KNOWN[name].search(text):
                         total += 1
                         if len(hits) < cap:
                             hits.append({"pattern": name, "kind": table, "id": oid})
@@ -777,6 +777,9 @@ def mem_status() -> str:
                        "embedding_dim": ing.backend.dim if ing.backend else 0,
                        "redaction_enabled": cfg.redact_enabled,
                        "redaction_patterns": list(cfg.redact_patterns),
+                       "rerank": cfg.rerank,
+                       "rerank_threshold": cfg.rerank_threshold,
+                       "rerank_pool": cfg.rerank_pool,
                        "backend_error": _STATE["backend_error"],
                        "summarizer": type(default_summarizer()).__name__,
                        "db": str(cfg.db_path),

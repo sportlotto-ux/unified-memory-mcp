@@ -59,10 +59,12 @@ VALID_SCOPES = ("all", "session", "facts")
 
 class Router:
     def __init__(self, store: Store, backend: EmbeddingBackend | None = None,
-                 cfg: Config | None = None) -> None:
+                 cfg: Config | None = None, rerank_transport=None) -> None:
         self.store = store
         self.backend = backend
         self.cfg = cfg or Config()
+        # Транспорт реранкера инъектируется в тестах; None = сетевой Zen.
+        self.rerank_transport = rerank_transport
         self.last_stats: dict = {}
 
     @property
@@ -120,7 +122,11 @@ class Router:
         # Ширина плеч НЕ зависит от limit: иначе порядок выдачи плывёт —
         # например, с limit=5 в KNN попадали посторонние факты, получали бонус
         # двух плеч и вытесняли точное попадание FTS из топ-1 (замер 18.10.2026).
-        arm = max(limit, self.cfg.recall_arm_limit)
+        # В режиме реранка пул шире: шум в пуле больше не вредит, решает Jev, а
+        # не RRF-голосование (ради чего плечи и сужались в обычном режиме).
+        pick = (max(limit, self.cfg.rerank_pool)
+                if self.cfg.rerank != "off" else limit)
+        arm = max(pick, self.cfg.recall_arm_limit)
         self.last_stats = {
             "dim_skipped": 0,
             "importance": {
@@ -273,7 +279,11 @@ class Router:
                                 archived=h.archived))
         adjusted.sort(key=lambda h: -h.score)
         self.last_stats["reranked"] = len(adjusted)
-        final = self._mmr(adjusted, limit, lam, pool=arm)
+        final = self._mmr(adjusted, pick, lam, pool=arm)
+        if self.cfg.rerank != "off" and len(final) > 1:
+            final = self._rerank_final(query, final, limit)
+        elif len(final) > limit:
+            final = final[:limit]
         if owner:
             # P2.7: банки на границе чтения. Лимит считается до фильтра
             # (under-fill возможен); утечки тел нет ни из одного плеча.
@@ -308,6 +318,7 @@ class Router:
                                    fuse_ms=round((time.perf_counter() - t0) * 1000, 3)),
                 "hops": hops,
                 "arm_limit": arm,
+                "rerank": self.last_stats.get("rerank"),
                 "bfs": self.last_stats.get("bfs"),
                 "importance": self.last_stats.get("importance", {}),
                 "degraded": {"vectors_enabled": self.backend is not None,
@@ -316,6 +327,41 @@ class Router:
                              "dim_skipped": self.last_stats.get("dim_skipped", 0)},
             }
         return final
+
+    def _rerank_final(self, query: str, hits: list[Hit], limit: int) -> list[Hit]:
+        """Переупорядочить пул судейством Jev; при любой ошибке — порядок RRF.
+
+        Свойства, заданные замером 18.10.2026:
+          * наружу уходят только отредактированные тела (rerank.prepare),
+            сообщения обрезаются до `rerank_doc_chars`;
+          * кандидаты ниже порога отсекаются, и если не прошёл никто — выдача
+            пустая: «памяти не хватает» честнее третьестепенного попадания;
+          * ошибка транспорта не глушится, а видна в diagnostics.rerank.error,
+            и выдача остаётся в порядке RRF.
+        """
+        from . import rerank as rerank_mod
+
+        docs = [{"key": f"{h.owner_table}:{h.owner_id}", "text": h.body or ""}
+                for h in hits]
+        cfg = {"url": self.cfg.rerank_url, "key": self.cfg.rerank_key,
+               "model": self.cfg.rerank_model,
+               "threshold": self.cfg.rerank_threshold,
+               "timeout": self.cfg.rerank_timeout,
+               "doc_chars": self.cfg.rerank_doc_chars}
+        try:
+            result = rerank_mod.rerank(query, docs, cfg,
+                                       transport=self.rerank_transport)
+        except Exception as exc:                                    # noqa: BLE001
+            result = {"error": f"{type(exc).__name__}: {str(exc)[:160]}"}
+        self.last_stats["rerank"] = {k: result.get(k) for k in
+                                     ("error", "kept", "dropped", "widen",
+                                      "ms", "tokens")}
+        if result.get("error"):
+            return hits[:limit]
+        order = {cid: i for i, cid in enumerate(result.get("order") or [])}
+        kept = [h for h in hits if f"{h.owner_table}:{h.owner_id}" in order]
+        kept.sort(key=lambda h: order[f"{h.owner_table}:{h.owner_id}"])
+        return kept[:limit]
 
     def _archive_hits(self, query: str, scope: str, session_id: str,
                       limit: int, owner: str, source: str) -> list[Hit]:

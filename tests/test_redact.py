@@ -1,7 +1,10 @@
 """Пункт 1 v0.4: redaction-гейт. Секреты не должны пережить ingest.
 
-Synthetic fixtures intentionally avoid provider-shaped ``sk-`` prefixes; the
-redaction contract under test is the ``api_key=`` assignment itself.
+Провайдерские ключи (``sk-``, ``ghp_``, ``AKIA`` …) были пробелом: все четыре
+LCM-шаблона требуют ключевого слова рядом, поэтому ``OPENAI_API_KEY=sk-…``
+проходил гейт. С 18.10.2026 их ловит ``token_prefix``, JWT — ``jwt``; фикстуры
+ниже проверяют это явно, плюс что безобидное (короткие git-хэши, sha256 образа)
+не режется.
 """
 
 import pytest
@@ -19,6 +22,31 @@ CASES = [
     ("password_assignment", "login password=MySecretPass123 ok", "MySecretPass123"),
     ("private_key", "key -----BEGIN RSA PRIVATE KEY-----\nSECRETKEYBODY999\n-----END RSA PRIVATE KEY----- end",
      "SECRETKEYBODY999"),
+    # Провайдерские ключи: ключевого слова рядом нет, опознаются по префиксу.
+    ("token_prefix", "env OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwx12 done",
+     "sk-abcdefghijklmnopqrstuvwx12"),
+    ("token_prefix", "remote https://ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345@github.com/a/b",
+     "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"),
+    ("token_prefix", "aws profile AKIAIOSFODNN7EXAMPLE для бэкапа",
+     "AKIAIOSFODNN7EXAMPLE"),
+    ("token_prefix", "slack bot xoxb-1234567890-abcdefghijkl в логе",
+     "xoxb-1234567890-abcdefghijkl"),
+    ("token_prefix", "huggingface hf_AbCdEfGhIjKlMnOpQrStUvWxYz012345 accepted",
+     "hf_AbCdEfGhIjKlMnOpQrStUvWxYz012345"),
+    ("jwt", "auth eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+            "eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+            "dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U ok",
+     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+     "eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+     "dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"),
+]
+
+# Безобидное, что резать НЕЛЬЗЯ: иначе память теряет полезное содержимое.
+BENIGN = [
+    "фикс зафиксирован в коммитах 53ca400 и 441a709",
+    "образ production sha256:7f5c4b2a9d1e8f3a6b0c5d4e7f8a9b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a",
+    "порт 8127, локальные эмбеддинги, vps4 130.61.174.27",
+    "почта user@example.com и ссылка https://example.com/a/b?c=d",
 ]
 
 
@@ -97,6 +125,29 @@ def test_disabled_passes_through(tmp_path):
 def test_idempotent():
     once = redact_text("api_key=FAKE_IDEMPOTENT_1234567890!")
     assert redact_text(once) == once
+
+
+@pytest.mark.parametrize("text", BENIGN)
+def test_benign_text_not_masked(text):
+    """Ложное срабатывание хуже пропуска: полезное содержимое должно уцелеть."""
+    assert redact_text(text) == text
+
+
+def test_opt_in_patterns_off_by_default_on_when_requested():
+    digest = "sha256:" + "ab12" * 16        # docker image digest / хэш сборки
+    assert redact_text(digest) == digest
+    assert PLACEHOLDER_PREFIX in redact_text(digest, ("long_hex",))
+    blob = "ABCdef123456" * 4               # база64-подобный блоб
+    assert redact_text(blob) == blob
+    assert PLACEHOLDER_PREFIX in redact_text(blob, ("long_base64",))
+
+
+def test_opt_in_pattern_accepted_from_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("UM_REDACT_PATTERNS", "token_prefix,long_hex")
+    assert Config(db_path=tmp_path / "d.db").redact_patterns == ("token_prefix", "long_hex")
+    monkeypatch.setenv("UM_REDACT_PATTERNS", "token_prefix,telepathy")
+    with pytest.raises(ValueError, match="UM_REDACT_PATTERNS"):
+        Config(db_path=tmp_path / "d.db")
 
 
 def test_unknown_pattern_rejected():
