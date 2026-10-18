@@ -116,6 +116,14 @@ def _default_arm_limit() -> int:
     return _strict_int("UM_RECALL_ARM_LIMIT", 10)
 
 
+def _default_edge_weight() -> float:
+    # Ребро — наводка на связь, а не ответ. При весе 1.0 (legacy) графовое
+    # плечо давало рёбрам голос верхнего ранга, и они вытесняли факты из топ-1:
+    # замер 18.10.2026 на 19 реальных запросах — scope=all hit@1 26% → 63% при
+    # весе 0.5, scope=facts не сдвинулся. Связи ищутся mem_graph_query.
+    return _strict_float("UM_EDGE_WEIGHT", 0.5)
+
+
 def _default_working_ttl_s() -> int:
     return _strict_int("UM_WORKING_TTL_S", 0)
 
@@ -259,6 +267,9 @@ class Config:
     # выдачи плывёт от размера запрошенной страницы (замер 18.10.2026: топ-1
     # совпадал при разных limit лишь у 9/19 запросов).
     recall_arm_limit: int = field(default_factory=_default_arm_limit)
+    # Вес ребра в RRF-слиянии: <1 не пускает «наводки»-связи вперёд
+    # содержимого (фактов/сообщений).
+    edge_weight: float = field(default_factory=_default_edge_weight)
     # P2.1: optional TTL for working slot-facts and bounded assembly cap.
     working_ttl_s: int = field(default_factory=_default_working_ttl_s)
     working_limit: int = field(default_factory=_default_working_limit)
@@ -286,6 +297,8 @@ class Config:
             raise ValueError("UM_WORKING_TTL_S must be >= 0 (0 = off)")
         if self.recall_arm_limit < 1:
             raise ValueError("UM_RECALL_ARM_LIMIT must be >= 1")
+        if self.edge_weight < 0:
+            raise ValueError("UM_EDGE_WEIGHT must be >= 0")
         if self.working_limit <= 0:
             raise ValueError("UM_WORKING_LIMIT must be > 0")
         if self.retention_days < 0:

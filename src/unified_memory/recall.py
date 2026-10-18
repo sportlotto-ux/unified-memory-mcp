@@ -16,13 +16,25 @@ from .store import Hit, Store, cosine, tokenize
 _RRF_K = 60
 
 
-def rrf_fuse(rank_lists: list[list[Hit]], k: int = _RRF_K) -> list[Hit]:
+def rrf_fuse(rank_lists: list[list[Hit]], k: int = _RRF_K,
+             edge_weight: float = 1.0) -> list[Hit]:
+    """RRF-слияние плеч; `edge_weight` приглушает рёбра.
+
+    Ребро — наводка на связь, а не ответ: графовое плечо отдаёт ему голос
+    верхнего ранга, а короткое тело `субъект --предикат--> объект` легко
+    совпадает с запросом, поэтому рёбра занимали топ-1 в fact-запросах
+    (замер 18.10.2026: scope=all hit@1 26% → 63% при весе 0.5, при этом
+    факты и сообщения не сдвинулись). Связи ищутся отдельным инструментом
+    (mem_graph_query), так что терять их в recall не нужно — достаточно не
+    пускать их вперёд содержимого.
+    """
     scores: dict[tuple[str, int], float] = {}
     keep: dict[tuple[str, int], Hit] = {}
     for lst in rank_lists:
         for rank, h in enumerate(lst):
             key = (h.owner_table, h.owner_id)
-            scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank + 1)
+            weight = edge_weight if h.owner_table == "um_edges" else 1.0
+            scores[key] = scores.get(key, 0.0) + weight / (k + rank + 1)
             prev = keep.get(key)
             # A4: сохранить сниппет, если его принесло FTS-плечо (прочие — без него).
             if prev is None or (not prev.snippet and h.snippet):
@@ -221,7 +233,8 @@ class Router:
             return []
         # v0.4-п.3: один пайп поверх fused — recency-приор, scope-bias, MMR.
         # Timestamps одним batch (макс. 4 запроса), а не правками трёх arm'ов.
-        fused = lists[0] if len(lists) == 1 else rrf_fuse(lists)
+        fused = (lists[0] if len(lists) == 1
+                 else rrf_fuse(lists, edge_weight=self.cfg.edge_weight))
         fused_refs = [(h.owner_table, h.owner_id) for h in fused]
         stamps = self.store.created_for(fused_refs)
         importance_values = (self.store.importance_for(fused_refs)
